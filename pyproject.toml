@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "imaget-lthc"
+version = "0.1.0"
+description = "Local Token Hyper-Connection diffusion model for ImageNet-256"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.4",
+  "torchvision",
+  "triton",
+  "numpy",
+  "pillow",
+  "wandb",
+]
+
+[tool.setuptools.packages.find]
+include = ["imaget_lthc*"]
