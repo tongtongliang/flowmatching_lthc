@@ -1,3 +1,3 @@
 # Triton kernels
 
-The detailed Triton implementation note has moved to [`kernel_note.md`](kernel_note.md).
+The detailed Triton implementation note lives next to the kernel source: [`../imaget_lthc/models/kernel_note.md`](../imaget_lthc/models/kernel_note.md).

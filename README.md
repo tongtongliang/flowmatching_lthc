@@ -123,7 +123,7 @@ The lazy workspace recurrence avoids per-layer high-resolution traffic, but the 
 
 $X_L = X_0 + \sum_l \mathcal{P}_l(\Delta Z_l)$.
 
-A naive PyTorch implementation creates one broadcasted high-resolution update per layer and repeatedly reads/writes the full `64 x 64 x 768` residual stream. The release uses a fixed-shape Triton kernel for B/4, depth 12 that fuses all 12 write-back operations plus the residual add into one high-resolution pass. This reduces memory traffic and gives `torch.compile` a stable graph. See `docs/kernel_note.md` for details.
+A naive PyTorch implementation creates one broadcasted high-resolution update per layer and repeatedly reads/writes the full `64 x 64 x 768` residual stream. The release uses a fixed-shape Triton kernel for B/4, depth 12 that fuses all 12 write-back operations plus the residual add into one high-resolution pass. This reduces memory traffic and gives `torch.compile` a stable graph. See `imaget_lthc/models/kernel_note.md` for details.
 
 ## Results from the reference run
 
@@ -133,13 +133,15 @@ Reference run:
 im256_local_thc_shared_write_fused_final12_b4_velocity_gpus4567_bs128_accum2_20260531_055810
 ```
 
-EMA, 50k samples, Heun 50, CFG 2.9:
+50k-sample ImageNet validation FID/IS, Heun 50, CFG 2.9. EMA is the main evaluation path after 250k; raw/model numbers are included where they were run.
 
-| step | FID50k | IS |
-|---:|---:|---:|
-| 300k | 12.52 | 114.42 |
-| 350k | 11.31 | 122.80 |
-| 400k | 10.63 | 127.59 |
+| step | raw/model FID50k | EMA FID50k | EMA IS |
+|---:|---:|---:|---:|
+| 200k | 19.87 | not run | not run |
+| 250k | 17.32 | 14.30 | 104.57 |
+| 300k | 17.10 | 12.52 | 114.42 |
+| 350k | not run | 11.31 | 122.80 |
+| 400k | not run | 10.63 | 127.59 |
 
 These numbers document the training setup that this code is meant to reproduce; they are not hard-coded in the code.
 
