@@ -201,9 +201,16 @@ def log_wandb(args, row):
 
 
 def compute_fid_is(sample_dir, fid_stats, cuda):
-    torch_home = Path(os.environ.get('TORCH_HOME', '.cache/torch_home'))
+    torch_home = Path(os.environ.get('TORCH_HOME', '/data/pengrun/tongtong/dataset_imagenet_256/metrics_cache/torch_home'))
     torch_home.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault('TORCH_HOME', str(torch_home))
+    # The reference JiT evaluation uses the vendored torch-fidelity fork,
+    # which supports precomputed FID statistics through fid_statistics_file.
+    # The PyPI/conda API in some environments requires input2 and will reject
+    # input2=None, so prefer the vendored implementation when it is available.
+    vendor_tf = Path('/data/pengrun/tongtong/Modified_DiT/modified_JiT/src/torch-fidelity')
+    if vendor_tf.is_dir() and str(vendor_tf) not in sys.path:
+        sys.path.insert(0, str(vendor_tf))
     import torch_fidelity
 
     return torch_fidelity.calculate_metrics(

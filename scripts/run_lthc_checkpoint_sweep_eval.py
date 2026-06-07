@@ -196,7 +196,7 @@ def main() -> None:
 
     env = os.environ.copy()
     env.setdefault("TMPDIR", "/data/pengrun/tongtong/.tmp")
-    env.setdefault("TORCH_HOME", str(out / "cache" / "torch_home"))
+    env.setdefault("TORCH_HOME", "/data/pengrun/tongtong/dataset_imagenet_256/metrics_cache/torch_home")
     env.setdefault("XDG_CACHE_HOME", str(out / "cache" / "xdg"))
     env["PYTHONPATH"] = str(repo) + os.pathsep + env.get("PYTHONPATH", "")
 
@@ -210,32 +210,59 @@ def main() -> None:
                     fid_done = True
                     break
         if not fid_done:
-            sample_dir.mkdir(parents=True, exist_ok=True)
-            cmd = [
-                "torchrun",
-                f"--nproc_per_node={args.nproc_per_node}",
-                str(repo / "scripts" / "evaluate_fid.py"),
-                "--checkpoint", str(ckpt),
-                "--output_dir", str(out),
-                "--state_key", args.state_key,
-                "--model", "lthc_b4_velocity",
-                "--prediction", "velocity",
-                "--num_samples", str(args.num_samples),
-                "--batch_size", str(args.sample_batch_per_rank),
-                "--steps", str(args.sample_steps),
-                "--cfg", str(args.cfg),
-                "--interval_min", str(args.interval_min),
-                "--interval_max", str(args.interval_max),
-                "--noise_scale", str(args.noise_scale),
-                "--fid_stats", str(args.fid_stats),
-                "--sample_dir", str(sample_dir),
-                "--csv_file", "fid_is.csv",
-                "--keep_samples",
-            ]
-            if args.compile:
-                cmd.extend(["--compile", "--compile_mode", args.compile_mode])
-            print(f"[step {step}] FID/IS eval start", flush=True)
-            run(cmd, logs / f"step_{step:08d}_fid_is.log", env)
+            existing_samples = 0
+            if sample_dir.exists():
+                existing_samples = sum(1 for _ in sample_dir.glob('*.png'))
+            if existing_samples == args.num_samples:
+                cmd = [
+                    args.python,
+                    str(repo / "scripts" / "score_existing_samples.py"),
+                    "--sample_dir", str(sample_dir),
+                    "--checkpoint", str(ckpt),
+                    "--output_dir", str(out),
+                    "--state_key", args.state_key,
+                    "--prediction", "velocity",
+                    "--num_samples", str(args.num_samples),
+                    "--batch_size", str(args.sample_batch_per_rank),
+                    "--world_size", str(args.nproc_per_node),
+                    "--steps", str(args.sample_steps),
+                    "--cfg", str(args.cfg),
+                    "--interval_min", str(args.interval_min),
+                    "--interval_max", str(args.interval_max),
+                    "--noise_scale", str(args.noise_scale),
+                    "--fid_stats", str(args.fid_stats),
+                    "--csv_file", "fid_is.csv",
+                    "--keep_samples",
+                ]
+                print(f"[step {step}] FID/IS score existing samples", flush=True)
+                run(cmd, logs / f"step_{step:08d}_score_existing.log", env)
+            else:
+                sample_dir.mkdir(parents=True, exist_ok=True)
+                cmd = [
+                    "torchrun",
+                    f"--nproc_per_node={args.nproc_per_node}",
+                    str(repo / "scripts" / "evaluate_fid.py"),
+                    "--checkpoint", str(ckpt),
+                    "--output_dir", str(out),
+                    "--state_key", args.state_key,
+                    "--model", "lthc_b4_velocity",
+                    "--prediction", "velocity",
+                    "--num_samples", str(args.num_samples),
+                    "--batch_size", str(args.sample_batch_per_rank),
+                    "--steps", str(args.sample_steps),
+                    "--cfg", str(args.cfg),
+                    "--interval_min", str(args.interval_min),
+                    "--interval_max", str(args.interval_max),
+                    "--noise_scale", str(args.noise_scale),
+                    "--fid_stats", str(args.fid_stats),
+                    "--sample_dir", str(sample_dir),
+                    "--csv_file", "fid_is.csv",
+                    "--keep_samples",
+                ]
+                if args.compile:
+                    cmd.extend(["--compile", "--compile_mode", args.compile_mode])
+                print(f"[step {step}] FID/IS eval start", flush=True)
+                run(cmd, logs / f"step_{step:08d}_fid_is.log", env)
         else:
             print(f"[step {step}] FID/IS exists; skip", flush=True)
 
