@@ -9,3 +9,5 @@ outputs/
 *.pth
 *.ckpt
 .DS_Store
+
+eval_runs/
