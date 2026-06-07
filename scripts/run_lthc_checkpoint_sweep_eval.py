@@ -69,6 +69,65 @@ def run(cmd: list[str], log_path: Path, env: dict[str, str]) -> None:
         raise RuntimeError(f"command failed with code {ret}: {' '.join(cmd)}; see {log_path}")
 
 
+def run_parallel(jobs: list[tuple[str, list[str], Path, dict[str, str]]]) -> None:
+    """Run independent metric jobs concurrently.
+
+    Each job gets its own log file and environment. This is used after sampling
+    so Inception, DINO, and SigLIP can occupy separate GPUs.
+    """
+    procs = []
+    for name, cmd, log_path, job_env in jobs:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log = log_path.open("w")
+        log.write("COMMAND: " + " ".join(cmd) + "\n")
+        log.flush()
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=job_env)
+        procs.append((name, cmd, log_path, log, proc))
+    errors = []
+    for name, cmd, log_path, log, proc in procs:
+        ret = proc.wait()
+        log.close()
+        if ret != 0:
+            errors.append(f"{name} failed with code {ret}; see {log_path}; cmd={' '.join(cmd)}")
+    if errors:
+        raise RuntimeError("\n".join(errors))
+
+
+def env_for_gpu(base_env: dict[str, str], gpu: int) -> dict[str, str]:
+    env = dict(base_env)
+    env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    return env
+
+
+def feature_done_for(out: Path, step: int, model_alias: str) -> bool:
+    for csv_name in ("feature_fd.csv", f"feature_fd_{model_alias}.csv"):
+        for row in load_rows(out / csv_name):
+            if str(row.get("checkpoint_step")) == str(step) and row.get("model_alias") == model_alias and row.get("status") == "ok":
+                return True
+    return False
+
+
+def sync_feature_csvs(out: Path, models: list[str]) -> None:
+    """Merge per-model feature CSVs into feature_fd.csv without duplicates."""
+    master = out / "feature_fd.csv"
+    rows = load_rows(master)
+    seen = {(r.get("checkpoint_step"), r.get("model_alias")) for r in rows if r.get("status") == "ok"}
+    for model_alias in models:
+        for row in load_rows(out / f"feature_fd_{model_alias}.csv"):
+            key = (row.get("checkpoint_step"), row.get("model_alias"))
+            if row.get("status") == "ok" and key not in seen:
+                rows.append(row)
+                seen.add(key)
+    if not rows:
+        return
+    fields = list(rows[0].keys())
+    with master.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in fields})
+
+
 def copy_checkpoint(src_run: Path, out_ckpt_dir: Path, step: int) -> Path:
     src = src_run / "checkpoints" / f"step_{step:08d}.pt"
     if not src.exists():
@@ -214,28 +273,7 @@ def main() -> None:
             if sample_dir.exists():
                 existing_samples = sum(1 for _ in sample_dir.glob('*.png'))
             if existing_samples == args.num_samples:
-                cmd = [
-                    args.python,
-                    str(repo / "scripts" / "score_existing_samples.py"),
-                    "--sample_dir", str(sample_dir),
-                    "--checkpoint", str(ckpt),
-                    "--output_dir", str(out),
-                    "--state_key", args.state_key,
-                    "--prediction", "velocity",
-                    "--num_samples", str(args.num_samples),
-                    "--batch_size", str(args.sample_batch_per_rank),
-                    "--world_size", str(args.nproc_per_node),
-                    "--steps", str(args.sample_steps),
-                    "--cfg", str(args.cfg),
-                    "--interval_min", str(args.interval_min),
-                    "--interval_max", str(args.interval_max),
-                    "--noise_scale", str(args.noise_scale),
-                    "--fid_stats", str(args.fid_stats),
-                    "--csv_file", "fid_is.csv",
-                    "--keep_samples",
-                ]
-                print(f"[step {step}] FID/IS score existing samples", flush=True)
-                run(cmd, logs / f"step_{step:08d}_score_existing.log", env)
+                print(f"[step {step}] samples exist; metric workers will reuse them", flush=True)
             else:
                 sample_dir.mkdir(parents=True, exist_ok=True)
                 cmd = [
@@ -258,41 +296,66 @@ def main() -> None:
                     "--sample_dir", str(sample_dir),
                     "--csv_file", "fid_is.csv",
                     "--keep_samples",
+                    "--sample_only",
                 ]
                 if args.compile:
                     cmd.extend(["--compile", "--compile_mode", args.compile_mode])
-                print(f"[step {step}] FID/IS eval start", flush=True)
-                run(cmd, logs / f"step_{step:08d}_fid_is.log", env)
+                print(f"[step {step}] sampling start", flush=True)
+                run(cmd, logs / f"step_{step:08d}_sample.log", env)
         else:
-            print(f"[step {step}] FID/IS exists; skip", flush=True)
+            print(f"[step {step}] FID/IS exists; samples may still be needed for missing feature FD", flush=True)
 
-        feat_done = set()
-        if args.skip_existing and (out / "feature_fd.csv").exists():
-            for row in load_rows(out / "feature_fd.csv"):
-                if str(row.get("checkpoint_step")) == str(step) and row.get("status") == "ok":
-                    feat_done.add(row.get("model_alias"))
-        missing = [m for m in args.feature_models if m not in feat_done]
-        if missing:
-            if not sample_dir.exists():
-                raise RuntimeError(f"sample_dir missing for feature FD: {sample_dir}")
-            cmd = [
+        missing_feature = [m for m in args.feature_models if not feature_done_for(out, step, m)]
+        if (not fid_done) or missing_feature:
+            sample_count = sum(1 for _ in sample_dir.glob('*.png')) if sample_dir.exists() else 0
+            if sample_count != args.num_samples:
+                raise RuntimeError(f"sample count mismatch before metrics for step {step}: expected {args.num_samples}, found {sample_count}")
+
+        jobs = []
+        if not fid_done:
+            fid_cmd = [
+                args.python,
+                str(repo / "scripts" / "score_existing_samples.py"),
+                "--sample_dir", str(sample_dir),
+                "--checkpoint", str(ckpt),
+                "--output_dir", str(out),
+                "--state_key", args.state_key,
+                "--prediction", "velocity",
+                "--num_samples", str(args.num_samples),
+                "--batch_size", str(args.sample_batch_per_rank),
+                "--world_size", str(args.nproc_per_node),
+                "--steps", str(args.sample_steps),
+                "--cfg", str(args.cfg),
+                "--interval_min", str(args.interval_min),
+                "--interval_max", str(args.interval_max),
+                "--noise_scale", str(args.noise_scale),
+                "--fid_stats", str(args.fid_stats),
+                "--csv_file", "fid_is.csv",
+                "--keep_samples",
+            ]
+            jobs.append(("fid_is", fid_cmd, logs / f"step_{step:08d}_score_existing.log", env_for_gpu(env, 0)))
+        for idx, model_alias in enumerate(missing_feature):
+            feat_cmd = [
                 args.python,
                 str(repo / "scripts" / "evaluate_feature_fd.py"),
                 "--real_dir", str(real_dir),
                 "--fake_dir", str(sample_dir),
                 "--output_dir", str(out),
                 "--feature_root", str(args.feature_root),
-                "--models", *missing,
+                "--models", model_alias,
                 "--max_images", str(args.num_samples),
                 "--batch_size", str(args.feature_batch_size),
                 "--num_workers", str(args.feature_num_workers),
                 "--checkpoint_step", str(step),
-                "--csv_file", "feature_fd.csv",
+                "--csv_file", f"feature_fd_{model_alias}.csv",
             ]
-            print(f"[step {step}] feature FD start models={missing}", flush=True)
-            run(cmd, logs / f"step_{step:08d}_feature_fd.log", env)
+            jobs.append((model_alias, feat_cmd, logs / f"step_{step:08d}_feature_fd_{model_alias}.log", env_for_gpu(env, idx + 1)))
+        if jobs:
+            print(f"[step {step}] metric workers start: {[name for name, _, _, _ in jobs]}", flush=True)
+            run_parallel(jobs)
+            sync_feature_csvs(out, args.feature_models)
         else:
-            print(f"[step {step}] feature FD exists; skip", flush=True)
+            print(f"[step {step}] all metrics exist; skip", flush=True)
 
         if not args.keep_samples and sample_dir.exists():
             shutil.rmtree(sample_dir)

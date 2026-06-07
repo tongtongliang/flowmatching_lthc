@@ -44,6 +44,7 @@ def parse_args():
     p.add_argument('--csv_file', default='metrics_history.csv')
     p.add_argument('--sample_dir', default='', help='Optional explicit sample directory. Defaults to output_dir/eval_samples_<step>_<timestamp>.')
     p.add_argument('--keep_samples', action='store_true', help='Keep generated PNGs instead of deleting them after metrics.')
+    p.add_argument('--sample_only', action='store_true', help='Only generate PNG samples; do not compute FID/IS or write the metric CSV.')
     p.add_argument('--wandb', action='store_true')
     p.add_argument('--wandb_project', default='jit-imagenet256')
     p.add_argument('--wandb_entity', default='tol011-uc-san-diego')
@@ -301,6 +302,19 @@ def main():
 
     if distributed:
         dist.barrier(device_ids=[local_rank] if torch.cuda.is_available() else None)
+
+    if args.sample_only:
+        if rank == 0:
+            print('SAMPLE_ONLY_DONE=' + json.dumps({
+                'checkpoint': str(args.checkpoint),
+                'checkpoint_step': step,
+                'sample_dir': str(sample_dir),
+                'num_samples': args.num_samples,
+                'sampling_sec': sampling_sec,
+            }), flush=True)
+        if distributed:
+            dist.destroy_process_group()
+        return
 
     row = {
         'timestamp_utc': datetime.utcnow().isoformat(),
