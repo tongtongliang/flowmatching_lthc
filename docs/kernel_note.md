@@ -145,7 +145,7 @@ The model exposes a naive path:
 model(x, t, y, use_lazy=False)
 ```
 
-This path materializes the high-resolution stream every layer and does not require the fused final accumulation kernel. It is useful for CPU smoke tests and checkpoint-loading checks.
+This path materializes the high-resolution stream every layer and does not require the fused final accumulation kernel. It is useful for CPU sanity checks and checkpoint-loading checks.
 
 For production CUDA inference/training, use the default lazy path:
 

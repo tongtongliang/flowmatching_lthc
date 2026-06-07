@@ -145,6 +145,12 @@ im256_local_thc_shared_write_fused_final12_b4_velocity_gpus4567_bs128_accum2_202
 
 These numbers document the training setup that this code is meant to reproduce; they are not hard-coded in the code.
 
+The compact CSV/plot snapshot is stored in:
+
+```text
+results/lthc_patch4_ema50k/
+```
+
 ## Installation
 
 Use an environment with PyTorch 2.x and Triton. The CUDA fast path expects GPUs supported by PyTorch SDPA/FlashAttention.
@@ -171,13 +177,13 @@ python scripts/sample_checkpoint.py \
   --cfg 2.9
 ```
 
-CPU/debug smoke test using the non-Triton naive path:
+CPU checkpoint-loading sanity check using the non-Triton naive path:
 
 ```bash
 python scripts/sample_checkpoint.py \
   --checkpoint /path/to/step_00400000.pt \
   --state_key ema \
-  --output outputs/smoke.png \
+  --output outputs/sanity.png \
   --device cpu \
   --batch_size 1 \
   --steps 1 \

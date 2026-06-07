@@ -18,7 +18,7 @@ from imaget_lthc.optim.muon import Muon, split_muon_params
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--data_path', default='../dataset_imagenet_256/imagenet256')
-    p.add_argument('--run_dir', default='runs/debug')
+    p.add_argument('--run_dir', default='runs/lthc_experiment')
     p.add_argument('--batch_size', type=int, default=128)
     p.add_argument('--grad_accum', type=int, default=1)
     p.add_argument('--num_workers', type=int, default=12)

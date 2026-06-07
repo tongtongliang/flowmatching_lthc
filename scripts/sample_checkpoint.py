@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Sample from an ImageNet LTHC checkpoint.
 
-Use ``--naive`` on CPU or for debugging. The default lazy path uses the fused
+Use ``--naive`` on CPU or for checkpoint validation. The default lazy path uses the fused
 Triton final-accumulate kernel and is intended for CUDA inference.
 """
 
