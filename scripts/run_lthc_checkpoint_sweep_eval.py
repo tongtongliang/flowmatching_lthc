@@ -334,22 +334,34 @@ def main() -> None:
                 "--keep_samples",
             ]
             jobs.append(("fid_is", fid_cmd, logs / f"step_{step:08d}_score_existing.log", env_for_gpu(env, 0)))
-        for idx, model_alias in enumerate(missing_feature):
+        if fid_done:
+            feature_gpu_groups = {
+                "dinov2_giant_reg": [0, 1, 2, 3],
+                "siglip2_giant_opt": [4, 5, 6, 7],
+            }
+        else:
+            feature_gpu_groups = {
+                "dinov2_giant_reg": [1, 2, 3, 4],
+                "siglip2_giant_opt": [5, 6, 7],
+            }
+        for model_alias in missing_feature:
+            gpu_group = feature_gpu_groups.get(model_alias, [1])
             feat_cmd = [
                 args.python,
-                str(repo / "scripts" / "evaluate_feature_fd.py"),
+                str(repo / "scripts" / "evaluate_feature_fd_sharded.py"),
                 "--real_dir", str(real_dir),
                 "--fake_dir", str(sample_dir),
                 "--output_dir", str(out),
                 "--feature_root", str(args.feature_root),
-                "--models", model_alias,
+                "--model_alias", model_alias,
                 "--max_images", str(args.num_samples),
                 "--batch_size", str(args.feature_batch_size),
                 "--num_workers", str(args.feature_num_workers),
                 "--checkpoint_step", str(step),
                 "--csv_file", f"feature_fd_{model_alias}.csv",
+                "--gpu_ids", *[str(g) for g in gpu_group],
             ]
-            jobs.append((model_alias, feat_cmd, logs / f"step_{step:08d}_feature_fd_{model_alias}.log", env_for_gpu(env, idx + 1)))
+            jobs.append((model_alias, feat_cmd, logs / f"step_{step:08d}_feature_fd_{model_alias}.log", env))
         if jobs:
             print(f"[step {step}] metric workers start: {[name for name, _, _, _ in jobs]}", flush=True)
             run_parallel(jobs)
