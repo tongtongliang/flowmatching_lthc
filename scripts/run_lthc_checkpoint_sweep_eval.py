@@ -99,6 +99,43 @@ def env_for_gpu(base_env: dict[str, str], gpu: int) -> dict[str, str]:
     return env
 
 
+def visible_gpu_ids(env: dict[str, str], fallback_count: int) -> list[int]:
+    """Return physical GPU ids available to child metric workers.
+
+    Sampling uses torchrun under the parent's CUDA_VISIBLE_DEVICES list. Metric
+    subprocesses, however, explicitly set CUDA_VISIBLE_DEVICES per worker, so
+    they need physical ids from the parent visibility list rather than logical
+    0..N ids.
+    """
+
+    raw = env.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if raw:
+        ids = [int(x) for x in raw.split(",") if x.strip()]
+    else:
+        ids = list(range(max(1, fallback_count)))
+    if not ids:
+        raise RuntimeError("No visible GPU ids available for evaluation")
+    return ids
+
+
+def split_feature_gpus(gpu_ids: list[int], fid_done: bool) -> dict[str, list[int]]:
+    """Allocate feature extractors across the currently visible physical GPUs."""
+
+    feature_pool = gpu_ids if fid_done else gpu_ids[1:]
+    if not feature_pool:
+        feature_pool = gpu_ids
+    if len(feature_pool) == 1:
+        return {
+            "dinov2_giant_reg": feature_pool,
+            "siglip2_giant_opt": feature_pool,
+        }
+    split = max(1, (len(feature_pool) + 1) // 2)
+    return {
+        "dinov2_giant_reg": feature_pool[:split],
+        "siglip2_giant_opt": feature_pool[split:] or feature_pool[-1:],
+    }
+
+
 def feature_done_for(out: Path, step: int, model_alias: str) -> bool:
     for csv_name in ("feature_fd.csv", f"feature_fd_{model_alias}.csv"):
         for row in load_rows(out / csv_name):
@@ -258,6 +295,7 @@ def main() -> None:
     env.setdefault("TORCH_HOME", "/data/pengrun/tongtong/dataset_imagenet_256/metrics_cache/torch_home")
     env.setdefault("XDG_CACHE_HOME", str(out / "cache" / "xdg"))
     env["PYTHONPATH"] = str(repo) + os.pathsep + env.get("PYTHONPATH", "")
+    metric_gpu_ids = visible_gpu_ids(env, args.nproc_per_node)
 
     for step in args.steps:
         ckpt = copy_checkpoint(Path(args.source_run), ckpt_dir, step)
@@ -333,19 +371,10 @@ def main() -> None:
                 "--csv_file", "fid_is.csv",
                 "--keep_samples",
             ]
-            jobs.append(("fid_is", fid_cmd, logs / f"step_{step:08d}_score_existing.log", env_for_gpu(env, 0)))
-        if fid_done:
-            feature_gpu_groups = {
-                "dinov2_giant_reg": [0, 1, 2, 3],
-                "siglip2_giant_opt": [4, 5, 6, 7],
-            }
-        else:
-            feature_gpu_groups = {
-                "dinov2_giant_reg": [1, 2, 3, 4],
-                "siglip2_giant_opt": [5, 6, 7],
-            }
+            jobs.append(("fid_is", fid_cmd, logs / f"step_{step:08d}_score_existing.log", env_for_gpu(env, metric_gpu_ids[0])))
+        feature_gpu_groups = split_feature_gpus(metric_gpu_ids, fid_done=fid_done)
         for model_alias in missing_feature:
-            gpu_group = feature_gpu_groups.get(model_alias, [1])
+            gpu_group = feature_gpu_groups.get(model_alias, metric_gpu_ids[:1])
             feat_cmd = [
                 args.python,
                 str(repo / "scripts" / "evaluate_feature_fd_sharded.py"),
