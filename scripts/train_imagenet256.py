@@ -10,6 +10,7 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+from imaget_lthc.checkpoint import load_model_state, migrate_checkpoint_state
 from imaget_lthc.imagenet import build_dataset, build_loader
 from imaget_lthc.models import MODEL_NAMES, build_model
 from imaget_lthc.optim.muon import Muon, split_muon_params
@@ -200,11 +201,11 @@ def main():
     start_step = 0
     if args.resume:
         ckpt = torch.load(args.resume, map_location='cpu')
-        raw_model.load_state_dict(ckpt['model'])
+        load_model_state(raw_model, ckpt, 'model')
         optimizer.load_state_dict(ckpt['optimizer'])
         start_step = int(ckpt['step'])
         if 'ema' in ckpt:
-            ema_state = ckpt['ema']
+            ema_state = migrate_checkpoint_state(ckpt['ema'])
             for name, e in zip([n for n, _ in named_params], ema_params):
                 if name in ema_state:
                     e.copy_(ema_state[name].to(device))

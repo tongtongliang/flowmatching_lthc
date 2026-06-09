@@ -112,8 +112,8 @@ def split_muon_params(named_params):
     aux_markers = (
         "embedding_table",
         "final_layer.linear",
-        "read_weight",
-        "write_logits",
+        "write_weight",
+        "read_logits",
     )
     for name, p in named_params:
         if not p.requires_grad:

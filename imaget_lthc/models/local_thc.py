@@ -10,6 +10,7 @@ persisted across blocks.
 from __future__ import annotations
 
 import math
+import re
 from contextlib import nullcontext
 
 import torch
@@ -35,6 +36,29 @@ from .local_thc_triton_kernels import final_accumulate_b4_12_traceable as triton
 
 def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+
+
+def migrate_lthc_state_dict_keys(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Map old read/write checkpoint keys to the README-consistent names.
+
+    Older research checkpoints used ``write`` for residual -> workspace and
+    ``read`` for workspace -> residual. The public code uses the opposite,
+    semantically correct convention:
+
+    - read: residual -> workspace, alpha/read_logits
+    - write: workspace -> residual, beta/write_weight
+    """
+    migrated = {}
+    for key, value in state_dict.items():
+        new_key = key
+        new_key = new_key.replace("shared_write.", "shared_read.")
+        new_key = re.sub(r"blocks\.(\d+)\.read\.", r"blocks.\1.write.", new_key)
+        new_key = new_key.replace(".hyper.write_logits", ".hyper.read_logits")
+        new_key = new_key.replace(".hyper.read_weight", ".hyper.write_weight")
+        new_key = new_key.replace(".write_logits", ".read_logits")
+        new_key = new_key.replace(".read_weight", ".write_weight")
+        migrated[new_key] = value
+    return migrated
 
 
 class BottleneckPatchEmbedNHWC(nn.Module):
@@ -306,9 +330,9 @@ class ChannelwiseLocalTokenHyperConnection(nn.Module):
       - read_from_residual:  z = R_l x_l
       - write_to_residual:  dx = P_l dz_l
 
-    The historical parameter names ``write_logits`` and ``read_weight`` are
-    kept for checkpoint compatibility. Old method names ``write``/``read`` are
-    kept as aliases only.
+    Historical checkpoints used the reversed names ``write_logits`` and
+    ``read_weight``. New checkpoints use ``read_logits`` for alpha and
+    ``write_weight`` for beta; the loader migrates old keys automatically.
     """
 
     def __init__(
@@ -333,23 +357,23 @@ class ChannelwiseLocalTokenHyperConnection(nn.Module):
         self.cell_size = high_grid // workspace_grid
         self.cell_tokens = self.cell_size * self.cell_size
         self.use_softmax_write = use_softmax_write
-        self.write_logits = nn.Parameter(torch.zeros(pool_groups, self.cell_tokens))
-        self.read_weight = nn.Parameter(torch.full((pool_groups, self.cell_tokens), float(init_read)))
+        self.read_logits = nn.Parameter(torch.zeros(pool_groups, self.cell_tokens))
+        self.write_weight = nn.Parameter(torch.full((pool_groups, self.cell_tokens), float(init_read)))
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        nn.init.constant_(self.write_logits, 0.0)
-        nn.init.constant_(self.read_weight, 1.0)
+        nn.init.constant_(self.read_logits, 0.0)
+        nn.init.constant_(self.write_weight, 1.0)
 
-    def _write_weight(self, dtype: torch.dtype) -> torch.Tensor:
+    def _residual_read_weight(self, dtype: torch.dtype) -> torch.Tensor:
         if self.use_softmax_write:
-            w = F.softmax(self.write_logits.float(), dim=-1)
+            w = F.softmax(self.read_logits.float(), dim=-1)
         else:
-            w = self.write_logits
+            w = self.read_logits
         return w.to(dtype=dtype).view(self.pool_groups, self.cell_size, self.cell_size)
 
-    def _read_weight(self, dtype: torch.dtype) -> torch.Tensor:
-        return self.read_weight.to(dtype=dtype).view(self.pool_groups, self.cell_size, self.cell_size)
+    def _residual_write_weight(self, dtype: torch.dtype) -> torch.Tensor:
+        return self.write_weight.to(dtype=dtype).view(self.pool_groups, self.cell_size, self.cell_size)
 
     def read_from_residual(self, x: torch.Tensor) -> torch.Tensor:
         b, h, w, c = x.shape
@@ -361,7 +385,7 @@ class ChannelwiseLocalTokenHyperConnection(nn.Module):
         if h != hh or w != hh or c != self.hidden_size:
             raise ValueError(f"expected [B,{hh},{hh},{self.hidden_size}], got {tuple(x.shape)}")
         x = x.view(b, gw, s, gw, s, gp, d)
-        alpha = self._write_weight(x.dtype).permute(1, 2, 0)
+        alpha = self._residual_read_weight(x.dtype).permute(1, 2, 0)
         alpha = alpha[None, None, :, None, :, :, None]
         z = (x * alpha).sum(dim=(2, 4))
         return z.reshape(b, gw * gw, c)
@@ -376,7 +400,7 @@ class ChannelwiseLocalTokenHyperConnection(nn.Module):
         if n != gw * gw or c != self.hidden_size:
             raise ValueError(f"expected [B,{gw * gw},{self.hidden_size}], got {tuple(dz.shape)}")
         dz = dz.view(b, gw, gw, gp, d)
-        beta = self._read_weight(dz.dtype).permute(1, 2, 0)
+        beta = self._residual_write_weight(dz.dtype).permute(1, 2, 0)
         beta = beta[None, None, :, None, :, :, None]
         dx = dz[:, :, None, :, None, :, :] * beta
         return dx.reshape(b, hh, hh, c)
@@ -384,10 +408,10 @@ class ChannelwiseLocalTokenHyperConnection(nn.Module):
     def write_to_residual_add(self, dz: torch.Tensor, x_hi: torch.Tensor) -> torch.Tensor:
         return x_hi + self.write_to_residual(dz)
 
-    def write(self, x: torch.Tensor) -> torch.Tensor:
+    def read(self, x: torch.Tensor) -> torch.Tensor:
         return self.read_from_residual(x)
 
-    def read(self, dz: torch.Tensor) -> torch.Tensor:
+    def write(self, dz: torch.Tensor) -> torch.Tensor:
         return self.write_to_residual(dz)
 
 
@@ -421,23 +445,23 @@ class ChannelwiseLocalTokenHyperConnectionCompilerFriendly(nn.Module):
         self.cell_size = high_grid // workspace_grid
         self.cell_tokens = self.cell_size * self.cell_size
         self.use_softmax_write = use_softmax_write
-        self.write_logits = nn.Parameter(torch.zeros(hidden_size, self.cell_tokens))
-        self.read_weight = nn.Parameter(torch.full((hidden_size, self.cell_tokens), float(init_read)))
+        self.read_logits = nn.Parameter(torch.zeros(hidden_size, self.cell_tokens))
+        self.write_weight = nn.Parameter(torch.full((hidden_size, self.cell_tokens), float(init_read)))
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        nn.init.constant_(self.write_logits, 0.0)
-        nn.init.constant_(self.read_weight, 1.0)
+        nn.init.constant_(self.read_logits, 0.0)
+        nn.init.constant_(self.write_weight, 1.0)
 
-    def _write_weight(self, dtype: torch.dtype) -> torch.Tensor:
+    def _residual_read_weight(self, dtype: torch.dtype) -> torch.Tensor:
         if self.use_softmax_write:
-            w = F.softmax(self.write_logits.float(), dim=-1)
+            w = F.softmax(self.read_logits.float(), dim=-1)
         else:
-            w = self.write_logits
+            w = self.read_logits
         return w.to(dtype=dtype).view(self.hidden_size, self.cell_size, self.cell_size).permute(1, 2, 0)
 
-    def _read_weight(self, dtype: torch.dtype) -> torch.Tensor:
-        return self.read_weight.to(dtype=dtype).view(self.hidden_size, self.cell_size, self.cell_size).permute(1, 2, 0)
+    def _residual_write_weight(self, dtype: torch.dtype) -> torch.Tensor:
+        return self.write_weight.to(dtype=dtype).view(self.hidden_size, self.cell_size, self.cell_size).permute(1, 2, 0)
 
     def read_from_residual(self, x: torch.Tensor) -> torch.Tensor:
         b, h, w, c = x.shape
@@ -447,7 +471,7 @@ class ChannelwiseLocalTokenHyperConnectionCompilerFriendly(nn.Module):
         if h != hh or w != hh or c != self.hidden_size:
             raise ValueError(f"expected [B,{hh},{hh},{self.hidden_size}], got {tuple(x.shape)}")
         x_cells = x.view(b, gw, s, gw, s, c)
-        alpha = self._write_weight(x.dtype)
+        alpha = self._residual_read_weight(x.dtype)
         z = (x_cells * alpha[None, None, :, None, :, :]).sum(dim=(2, 4))
         return z.reshape(b, gw * gw, c)
 
@@ -458,7 +482,7 @@ class ChannelwiseLocalTokenHyperConnectionCompilerFriendly(nn.Module):
         s = self.cell_size
         if n != gw * gw or c != self.hidden_size:
             raise ValueError(f"expected [B,{gw * gw},{self.hidden_size}], got {tuple(dz.shape)}")
-        beta = self._read_weight(dz.dtype)
+        beta = self._residual_write_weight(dz.dtype)
         dx = dz.view(b, gw, gw, c)[:, :, None, :, None, :] * beta[None, None, :, None, :, :]
         return dx.reshape(b, hh, hh, c)
 
@@ -469,18 +493,18 @@ class ChannelwiseLocalTokenHyperConnectionCompilerFriendly(nn.Module):
         s = self.cell_size
         if n != gw * gw or c != self.hidden_size:
             raise ValueError(f"expected [B,{gw * gw},{self.hidden_size}], got {tuple(dz.shape)}")
-        beta = self._read_weight(dz.dtype)
+        beta = self._residual_write_weight(dz.dtype)
         dx = dz.view(b, gw, gw, c)[:, :, None, :, None, :] * beta[None, None, :, None, :, :]
         x_cells = x_hi.view(b, gw, s, gw, s, c)
         return (x_cells + dx).reshape(b, hh, hh, c)
 
-    def write(self, x: torch.Tensor) -> torch.Tensor:
+    def read(self, x: torch.Tensor) -> torch.Tensor:
         return self.read_from_residual(x)
 
-    def read(self, dz: torch.Tensor) -> torch.Tensor:
+    def write(self, dz: torch.Tensor) -> torch.Tensor:
         return self.write_to_residual(dz)
 
-    def read_add(self, dz: torch.Tensor, x_hi: torch.Tensor) -> torch.Tensor:
+    def write_add(self, dz: torch.Tensor, x_hi: torch.Tensor) -> torch.Tensor:
         return self.write_to_residual_add(dz, x_hi)
 
 
@@ -506,7 +530,7 @@ class ChannelwiseLocalTokenHyperConnectionTriton(nn.Module):
         if pool_groups != hidden_size:
             raise ValueError("Triton LocalTHC currently requires pool_groups == hidden_size")
         if not use_softmax_write:
-            raise ValueError("Triton LocalTHC currently assumes softmax write weights")
+            raise ValueError("Triton LocalTHC currently assumes softmax read weights")
         self.high_grid = high_grid
         self.workspace_grid = workspace_grid
         self.hidden_size = hidden_size
@@ -515,25 +539,25 @@ class ChannelwiseLocalTokenHyperConnectionTriton(nn.Module):
         self.cell_size = 4
         self.cell_tokens = 16
         self.use_softmax_write = use_softmax_write
-        self.write_logits = nn.Parameter(torch.zeros(hidden_size, self.cell_tokens))
-        self.read_weight = nn.Parameter(torch.full((hidden_size, self.cell_tokens), float(init_read)))
+        self.read_logits = nn.Parameter(torch.zeros(hidden_size, self.cell_tokens))
+        self.write_weight = nn.Parameter(torch.full((hidden_size, self.cell_tokens), float(init_read)))
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        nn.init.constant_(self.write_logits, 0.0)
-        nn.init.constant_(self.read_weight, 1.0)
+        nn.init.constant_(self.read_logits, 0.0)
+        nn.init.constant_(self.write_weight, 1.0)
 
     def read_from_residual(self, x: torch.Tensor) -> torch.Tensor:
-        alpha = F.softmax(self.write_logits.float(), dim=-1).to(dtype=x.dtype)
+        alpha = F.softmax(self.read_logits.float(), dim=-1).to(dtype=x.dtype)
         return triton_local_write(x, alpha)
 
     def write_to_residual(self, dz: torch.Tensor) -> torch.Tensor:
-        return triton_local_read(dz, self.read_weight.to(dtype=dz.dtype))
+        return triton_local_read(dz, self.write_weight.to(dtype=dz.dtype))
 
-    def write(self, x: torch.Tensor) -> torch.Tensor:
+    def read(self, x: torch.Tensor) -> torch.Tensor:
         return self.read_from_residual(x)
 
-    def read(self, dz: torch.Tensor) -> torch.Tensor:
+    def write(self, dz: torch.Tensor) -> torch.Tensor:
         return self.write_to_residual(dz)
 
 
@@ -541,9 +565,9 @@ class ChannelwiseLocalTokenHyperConnectionTritonReadAdd(ChannelwiseLocalTokenHyp
     """Triton read/write with read and outer residual fused in forward."""
 
     def write_to_residual_add(self, dz: torch.Tensor, x_hi: torch.Tensor) -> torch.Tensor:
-        return triton_local_read_add(dz, self.read_weight.to(dtype=dz.dtype), x_hi)
+        return triton_local_read_add(dz, self.write_weight.to(dtype=dz.dtype), x_hi)
 
-    def read_add(self, dz: torch.Tensor, x_hi: torch.Tensor) -> torch.Tensor:
+    def write_add(self, dz: torch.Tensor, x_hi: torch.Tensor) -> torch.Tensor:
         return self.write_to_residual_add(dz, x_hi)
 
 
@@ -551,22 +575,22 @@ class ChannelwiseLocalTokenHyperConnectionTritonFrozen(ChannelwiseLocalTokenHype
     """Triton speed upper bound with no gradients for local read/write weights."""
 
     def read_from_residual(self, x: torch.Tensor) -> torch.Tensor:
-        alpha = F.softmax(self.write_logits.float(), dim=-1).to(dtype=x.dtype)
+        alpha = F.softmax(self.read_logits.float(), dim=-1).to(dtype=x.dtype)
         return triton_local_write_no_weight_grad(x, alpha)
 
     def write_to_residual_add(self, dz: torch.Tensor, x_hi: torch.Tensor) -> torch.Tensor:
-        return triton_local_read_add_no_weight_grad(dz, self.read_weight.to(dtype=dz.dtype), x_hi)
+        return triton_local_read_add_no_weight_grad(dz, self.write_weight.to(dtype=dz.dtype), x_hi)
 
     def write_to_residual(self, dz: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError("Use write_to_residual_add for TritonFrozen LocalTHC.")
 
-    def write(self, x: torch.Tensor) -> torch.Tensor:
+    def read(self, x: torch.Tensor) -> torch.Tensor:
         return self.read_from_residual(x)
 
-    def read_add(self, dz: torch.Tensor, x_hi: torch.Tensor) -> torch.Tensor:
+    def write_add(self, dz: torch.Tensor, x_hi: torch.Tensor) -> torch.Tensor:
         return self.write_to_residual_add(dz, x_hi)
 
-    def read(self, dz: torch.Tensor) -> torch.Tensor:
+    def write(self, dz: torch.Tensor) -> torch.Tensor:
         return self.write_to_residual(dz)
 
 
@@ -574,22 +598,22 @@ class ChannelwiseLocalTokenHyperConnectionTritonTraceable(ChannelwiseLocalTokenH
     """Triton read/write registered as compiler-visible torch.library ops."""
 
     def read_from_residual(self, x: torch.Tensor) -> torch.Tensor:
-        alpha = F.softmax(self.write_logits.float(), dim=-1).to(dtype=x.dtype)
+        alpha = F.softmax(self.read_logits.float(), dim=-1).to(dtype=x.dtype)
         return triton_local_write_traceable(x, alpha)
 
     def write_to_residual_add(self, dz: torch.Tensor, x_hi: torch.Tensor) -> torch.Tensor:
-        return triton_local_read_add_traceable(dz, self.read_weight.to(dtype=dz.dtype), x_hi)
+        return triton_local_read_add_traceable(dz, self.write_weight.to(dtype=dz.dtype), x_hi)
 
     def write_to_residual(self, dz: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError("Use write_to_residual_add for TritonTraceable LocalTHC.")
 
-    def write(self, x: torch.Tensor) -> torch.Tensor:
+    def read(self, x: torch.Tensor) -> torch.Tensor:
         return self.read_from_residual(x)
 
-    def read_add(self, dz: torch.Tensor, x_hi: torch.Tensor) -> torch.Tensor:
+    def write_add(self, dz: torch.Tensor, x_hi: torch.Tensor) -> torch.Tensor:
         return self.write_to_residual_add(dz, x_hi)
 
-    def read(self, dz: torch.Tensor) -> torch.Tensor:
+    def write(self, dz: torch.Tensor) -> torch.Tensor:
         return self.write_to_residual(dz)
 
 
@@ -623,23 +647,23 @@ class ChannelwiseLocalTokenHyperConnectionDepthwiseConv(nn.Module):
         self.cell_size = high_grid // workspace_grid
         self.cell_tokens = self.cell_size * self.cell_size
         self.use_softmax_write = use_softmax_write
-        self.write_logits = nn.Parameter(torch.zeros(hidden_size, self.cell_tokens))
-        self.read_weight = nn.Parameter(torch.full((hidden_size, self.cell_tokens), float(init_read)))
+        self.read_logits = nn.Parameter(torch.zeros(hidden_size, self.cell_tokens))
+        self.write_weight = nn.Parameter(torch.full((hidden_size, self.cell_tokens), float(init_read)))
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        nn.init.constant_(self.write_logits, 0.0)
-        nn.init.constant_(self.read_weight, 1.0)
-
-    def _write_kernel(self, dtype: torch.dtype) -> torch.Tensor:
-        if self.use_softmax_write:
-            w = F.softmax(self.write_logits.float(), dim=-1)
-        else:
-            w = self.write_logits
-        return w.to(dtype=dtype).view(self.hidden_size, 1, self.cell_size, self.cell_size)
+        nn.init.constant_(self.read_logits, 0.0)
+        nn.init.constant_(self.write_weight, 1.0)
 
     def _read_kernel(self, dtype: torch.dtype) -> torch.Tensor:
-        return self.read_weight.to(dtype=dtype).view(self.hidden_size, 1, self.cell_size, self.cell_size)
+        if self.use_softmax_write:
+            w = F.softmax(self.read_logits.float(), dim=-1)
+        else:
+            w = self.read_logits
+        return w.to(dtype=dtype).view(self.hidden_size, 1, self.cell_size, self.cell_size)
+
+    def _write_kernel(self, dtype: torch.dtype) -> torch.Tensor:
+        return self.write_weight.to(dtype=dtype).view(self.hidden_size, 1, self.cell_size, self.cell_size)
 
     def read_from_residual(self, x: torch.Tensor) -> torch.Tensor:
         b, c, h, w = x.shape
@@ -647,7 +671,7 @@ class ChannelwiseLocalTokenHyperConnectionDepthwiseConv(nn.Module):
             raise ValueError(f"expected [B,{self.hidden_size},{self.high_grid},{self.high_grid}], got {tuple(x.shape)}")
         z = F.conv2d(
             x,
-            self._write_kernel(x.dtype),
+            self._read_kernel(x.dtype),
             bias=None,
             stride=self.cell_size,
             groups=self.hidden_size,
@@ -661,21 +685,21 @@ class ChannelwiseLocalTokenHyperConnectionDepthwiseConv(nn.Module):
         dz = dz.transpose(1, 2).reshape(b, c, self.workspace_grid, self.workspace_grid)
         return F.conv_transpose2d(
             dz,
-            self._read_kernel(dz.dtype),
+            self._write_kernel(dz.dtype),
             bias=None,
             stride=self.cell_size,
             groups=self.hidden_size,
         )
 
-    def write(self, x: torch.Tensor) -> torch.Tensor:
+    def read(self, x: torch.Tensor) -> torch.Tensor:
         return self.read_from_residual(x)
 
-    def read(self, dz: torch.Tensor) -> torch.Tensor:
+    def write(self, dz: torch.Tensor) -> torch.Tensor:
         return self.write_to_residual(dz)
 
 
 class ChannelwiseLocalTokenHyperConnectionFixedPool(nn.Module):
-    """Fixed avg-write / broadcast-read speed reference."""
+    """Fixed avg-read / broadcast-write speed reference."""
 
     def __init__(self, high_grid: int, workspace_grid: int, hidden_size: int, pool_groups: int) -> None:
         super().__init__()
@@ -697,10 +721,10 @@ class ChannelwiseLocalTokenHyperConnectionFixedPool(nn.Module):
         dz = dz.transpose(1, 2).reshape(b, c, self.workspace_grid, self.workspace_grid)
         return dz.repeat_interleave(self.cell_size, dim=2).repeat_interleave(self.cell_size, dim=3)
 
-    def write(self, x: torch.Tensor) -> torch.Tensor:
+    def read(self, x: torch.Tensor) -> torch.Tensor:
         return self.read_from_residual(x)
 
-    def read(self, dz: torch.Tensor) -> torch.Tensor:
+    def write(self, dz: torch.Tensor) -> torch.Tensor:
         return self.write_to_residual(dz)
 
 
@@ -913,6 +937,10 @@ class LocalTHCJiT(nn.Module):
         self.final_layer = self.final_cls(hidden_size, patch_size, self.out_channels)
         self.initialize_weights()
 
+    def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
+        state_dict = migrate_lthc_state_dict_keys(state_dict)
+        return super().load_state_dict(state_dict, strict=strict, assign=assign)
+
     def initialize_weights(self) -> None:
         def basic_init(module: nn.Module) -> None:
             if isinstance(module, nn.Linear):
@@ -1090,13 +1118,13 @@ class LocalTHCDirectTritonSharedAdaLNJiT(LocalTHCTritonSharedAdaLNJiT):
 
 
 class LocalTHCTritonReadAddSharedAdaLNJiT(LocalTHCSharedAdaLNJiT):
-    """Shared-AdaLN LocalTHC with Triton fused read_add."""
+    """Shared-AdaLN LocalTHC with legacy-named Triton fused write_add."""
 
     block_cls = LocalTHCTritonReadAddSharedAdaLNJiTBlock
 
 
 class LocalTHCDirectTritonReadAddSharedAdaLNJiT(LocalTHCTritonReadAddSharedAdaLNJiT):
-    """Direct patch embed + Triton fused read_add."""
+    """Direct patch embed + legacy-named Triton fused write_add."""
 
     x_embedder_cls = DirectPatchEmbedNHWC
 
@@ -1137,12 +1165,12 @@ class LocalTHCDirectCompilerFriendlySharedAdaLNJiT(LocalTHCCompilerFriendlyShare
     x_embedder_cls = DirectPatchEmbedNHWC
 
 
-class SharedLocalWrite(nn.Module):
-    """Depth-shared local write operator for lazy LocalTHC execution.
+class SharedLocalRead(nn.Module):
+    """Depth-shared local read operator for lazy LocalTHC execution.
 
     The operator maps a high-resolution NHWC residual stream to the workspace:
     [B, Hh, Hh, C] -> [B, Gw*Gw, C]. Unlike the normal LocalTHC block-local
-    hyper-connection, this write weight is owned by the top-level model and is
+    hyper-connection, this read weight is owned by the top-level model and is
     shared across all layers.
     """
 
@@ -1167,20 +1195,20 @@ class SharedLocalWrite(nn.Module):
         self.cell_size = high_grid // workspace_grid
         self.cell_tokens = self.cell_size * self.cell_size
         self.use_softmax_write = use_softmax_write
-        self.write_logits = nn.Parameter(torch.zeros(pool_groups, self.cell_tokens))
+        self.read_logits = nn.Parameter(torch.zeros(pool_groups, self.cell_tokens))
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        nn.init.constant_(self.write_logits, 0.0)
+        nn.init.constant_(self.read_logits, 0.0)
 
     def alpha(self, dtype: torch.dtype | None = None) -> torch.Tensor:
         if self.use_softmax_write:
-            alpha = F.softmax(self.write_logits.float(), dim=-1)
+            alpha = F.softmax(self.read_logits.float(), dim=-1)
         else:
-            alpha = self.write_logits
+            alpha = self.read_logits
         return alpha if dtype is None else alpha.to(dtype=dtype)
 
-    def write(self, x: torch.Tensor) -> torch.Tensor:
+    def read(self, x: torch.Tensor) -> torch.Tensor:
         b, h, w, c = x.shape
         hh = self.high_grid
         gw = self.workspace_grid
@@ -1195,11 +1223,11 @@ class SharedLocalWrite(nn.Module):
         return z.reshape(b, gw * gw, c)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.write(x)
+        return self.read(x)
 
 
-class LayerLocalRead(nn.Module):
-    """Layer-specific local read operator used with a shared write."""
+class LayerLocalWrite(nn.Module):
+    """Layer-specific local write operator used with a shared read."""
 
     def __init__(
         self,
@@ -1221,16 +1249,16 @@ class LayerLocalRead(nn.Module):
         self.group_dim = hidden_size // pool_groups
         self.cell_size = high_grid // workspace_grid
         self.cell_tokens = self.cell_size * self.cell_size
-        self.read_weight = nn.Parameter(torch.full((pool_groups, self.cell_tokens), float(init_read)))
+        self.write_weight = nn.Parameter(torch.full((pool_groups, self.cell_tokens), float(init_read)))
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        nn.init.constant_(self.read_weight, 1.0)
+        nn.init.constant_(self.write_weight, 1.0)
 
     def beta(self, dtype: torch.dtype | None = None) -> torch.Tensor:
-        return self.read_weight if dtype is None else self.read_weight.to(dtype=dtype)
+        return self.write_weight if dtype is None else self.write_weight.to(dtype=dtype)
 
-    def read(self, dz: torch.Tensor) -> torch.Tensor:
+    def write(self, dz: torch.Tensor) -> torch.Tensor:
         b, n, c = dz.shape
         hh = self.high_grid
         gw = self.workspace_grid
@@ -1244,8 +1272,8 @@ class LayerLocalRead(nn.Module):
         dx = dz[:, :, None, :, None, :, :] * beta[None, None, :, None, :, :, None]
         return dx.reshape(b, hh, hh, c)
 
-    def read_add(self, x_hi: torch.Tensor, dz: torch.Tensor) -> torch.Tensor:
-        return x_hi + self.read(dz)
+    def write_add(self, x_hi: torch.Tensor, dz: torch.Tensor) -> torch.Tensor:
+        return x_hi + self.write(dz)
 
     def gamma_from_alpha(self, alpha: torch.Tensor) -> torch.Tensor:
         beta = self.beta(dtype=alpha.dtype)
@@ -1255,8 +1283,8 @@ class LayerLocalRead(nn.Module):
         return gamma_g[:, None].expand(self.pool_groups, self.group_dim).reshape(self.hidden_size)
 
 
-class SharedWriteLocalTHCSharedAdaLNJiTBlock(nn.Module):
-    """LocalTHC block using a depth-shared write and layer-specific read."""
+class SharedReadLocalTHCSharedAdaLNJiTBlock(nn.Module):
+    """LocalTHC block using a depth-shared read and layer-specific write."""
 
     def __init__(
         self,
@@ -1272,42 +1300,47 @@ class SharedWriteLocalTHCSharedAdaLNJiTBlock(nn.Module):
     ) -> None:
         super().__init__()
         pool_groups = hidden_size if pool_groups is None else pool_groups
-        self.read = LayerLocalRead(high_grid, workspace_grid, hidden_size, pool_groups)
+        self.write = LayerLocalWrite(high_grid, workspace_grid, hidden_size, pool_groups)
         self.branch = WorkspaceSharedAdaLNBranch(hidden_size, num_heads, mlp_ratio, attn_drop, proj_drop, attn_backend)
+
+    @property
+    def read(self) -> LayerLocalWrite:
+        """Backward-compatible module alias for old research checkpoints."""
+        return self.write
 
     def forward_naive(
         self,
         x_hi: torch.Tensor,
         t6: torch.Tensor,
         rope: VisionRotaryEmbeddingFast,
-        shared_write: SharedLocalWrite,
+        shared_read: SharedLocalRead,
     ) -> torch.Tensor:
-        z = shared_write.write(x_hi)
+        z = shared_read.read(x_hi)
         dz = self.branch(z, t6, rope)
-        return self.read.read_add(x_hi, dz)
+        return self.write.write_add(x_hi, dz)
 
     def branch_update(self, z: torch.Tensor, t6: torch.Tensor, rope: VisionRotaryEmbeddingFast) -> torch.Tensor:
         return self.branch(z, t6, rope)
 
-    def lazy_workspace_update(self, z: torch.Tensor, dz: torch.Tensor, shared_write: SharedLocalWrite) -> torch.Tensor:
-        alpha = shared_write.alpha(dtype=dz.dtype)
-        gamma = self.read.gamma_from_alpha(alpha)
+    def lazy_workspace_update(self, z: torch.Tensor, dz: torch.Tensor, shared_read: SharedLocalRead) -> torch.Tensor:
+        alpha = shared_read.alpha(dtype=dz.dtype)
+        gamma = self.write.gamma_from_alpha(alpha)
         return z + gamma[None, None, :] * dz
 
 
-class SharedWriteLocalTHCSharedAdaLNJiT(LocalTHCSharedAdaLNJiT):
-    """Shared-write LocalTHC with shared AdaLN conditioning.
+class SharedReadLocalTHCSharedAdaLNJiT(LocalTHCSharedAdaLNJiT):
+    """Shared-read LocalTHC with shared AdaLN conditioning.
 
     The lazy path is exact for the local channel/group read-write operators:
-    once the write R is shared across layers, the workspace can be updated as
+    once the read R is shared across layers, the workspace can be updated as
     z_{l+1} = z_l + (R P_l) dz_l, where R P_l is only a per-channel/group scale.
     """
 
-    block_cls = SharedWriteLocalTHCSharedAdaLNJiTBlock
+    block_cls = SharedReadLocalTHCSharedAdaLNJiTBlock
 
     def __init__(self, *args, use_lazy: bool = True, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.shared_write = SharedLocalWrite(
+        self.shared_read = SharedLocalRead(
             high_grid=self.high_grid,
             workspace_grid=self.workspace_grid,
             hidden_size=self.hidden_size,
@@ -1316,13 +1349,18 @@ class SharedWriteLocalTHCSharedAdaLNJiT(LocalTHCSharedAdaLNJiT):
         )
         self.use_lazy = bool(use_lazy)
 
+    @property
+    def shared_write(self) -> SharedLocalRead:
+        """Backward-compatible module alias for old research code."""
+        return self.shared_read
+
     def forward_naive(self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         c = self.t_embedder(t) + self.y_embedder(y)
         t6 = self.shared_adaLN_modulation(c)
         t2 = self.shared_final_modulation(c)
         x_hi = self.x_embedder(x)
         for block in self.blocks:
-            x_hi = block.forward_naive(x_hi, t6, self.workspace_rope, self.shared_write)
+            x_hi = block.forward_naive(x_hi, t6, self.workspace_rope, self.shared_read)
         b, hh, wh, c_dim = x_hi.shape
         x_out = self.final_layer(x_hi.reshape(b, hh * wh, c_dim), t2)
         return self.unpatchify(x_out)
@@ -1330,7 +1368,7 @@ class SharedWriteLocalTHCSharedAdaLNJiT(LocalTHCSharedAdaLNJiT):
     def final_accumulate_reference(self, x0: torch.Tensor, dz_list: list[torch.Tensor]) -> torch.Tensor:
         x_hi = x0
         for block, dz in zip(self.blocks, dz_list, strict=True):
-            x_hi = block.read.read_add(x_hi, dz)
+            x_hi = block.write.write_add(x_hi, dz)
         return x_hi
 
     def forward_lazy(self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -1338,12 +1376,12 @@ class SharedWriteLocalTHCSharedAdaLNJiT(LocalTHCSharedAdaLNJiT):
         t6 = self.shared_adaLN_modulation(c)
         t2 = self.shared_final_modulation(c)
         x0 = self.x_embedder(x)
-        z = self.shared_write.write(x0)
+        z = self.shared_read.read(x0)
         dz_list = []
         for block in self.blocks:
             dz = block.branch_update(z, t6, self.workspace_rope)
             dz_list.append(dz)
-            z = block.lazy_workspace_update(z, dz, self.shared_write)
+            z = block.lazy_workspace_update(z, dz, self.shared_read)
         x_hi = self.final_accumulate_reference(x0, dz_list)
         b, hh, wh, c_dim = x_hi.shape
         x_out = self.final_layer(x_hi.reshape(b, hh * wh, c_dim), t2)
@@ -1356,11 +1394,11 @@ class SharedWriteLocalTHCSharedAdaLNJiT(LocalTHCSharedAdaLNJiT):
         return self.forward_naive(x, t, y)
 
 
-class SharedWriteFusedFinalLocalTHCSharedAdaLNJiT(SharedWriteLocalTHCSharedAdaLNJiT):
-    """Shared-write LocalTHC using a fused final high-res accumulate kernel.
+class SharedReadFusedFinalLocalTHCSharedAdaLNJiT(SharedReadLocalTHCSharedAdaLNJiT):
+    """Shared-read LocalTHC using a fused final high-res accumulate kernel.
 
-    This keeps the same workspace recurrence as ``SharedWriteLocalTHCSharedAdaLNJiT``
-    but replaces the terminal Python loop over 12 ``read_add`` calls with one
+    This keeps the same workspace recurrence as ``SharedReadLocalTHCSharedAdaLNJiT``
+    but replaces the terminal Python loop over 12 ``write_add`` calls with one
     fixed-shape Triton op for B/4. The stack operations are intentionally kept
     explicit so we can test whether the fused high-res pass helps under
     ``torch.compile`` before writing a more invasive no-stack variant.
@@ -1368,18 +1406,29 @@ class SharedWriteFusedFinalLocalTHCSharedAdaLNJiT(SharedWriteLocalTHCSharedAdaLN
 
     def final_accumulate_reference(self, x0: torch.Tensor, dz_list: list[torch.Tensor]) -> torch.Tensor:
         dz_stack = torch.stack(dz_list, dim=0).contiguous()
-        beta_stack = torch.stack([block.read.read_weight for block in self.blocks], dim=0).contiguous()
+        beta_stack = torch.stack([block.write.write_weight for block in self.blocks], dim=0).contiguous()
         return triton_final_accumulate_b4_traceable(x0, dz_stack, beta_stack)
 
 
-class SharedWriteFusedFinal12LocalTHCSharedAdaLNJiT(SharedWriteLocalTHCSharedAdaLNJiT):
-    """No-stack fused-final shared-write LocalTHC for fixed depth=12 B/4."""
+class SharedReadFusedFinal12LocalTHCSharedAdaLNJiT(SharedReadLocalTHCSharedAdaLNJiT):
+    """No-stack fused-final shared-read LocalTHC for fixed depth=12 B/4."""
 
     def final_accumulate_reference(self, x0: torch.Tensor, dz_list: list[torch.Tensor]) -> torch.Tensor:
         if len(dz_list) != 12 or len(self.blocks) != 12:
-            raise ValueError("SharedWriteFusedFinal12LocalTHCSharedAdaLNJiT requires depth=12")
-        betas = [block.read.read_weight for block in self.blocks]
+            raise ValueError("SharedReadFusedFinal12LocalTHCSharedAdaLNJiT requires depth=12")
+        betas = [block.write.write_weight for block in self.blocks]
         return triton_final_accumulate_b4_12_traceable(x0, *dz_list, *betas)
+
+
+# Backward-compatible class aliases. The old "SharedWrite" name referred to
+# the same high-res -> workspace operator that the README now correctly calls
+# "read".
+SharedLocalWrite = SharedLocalRead
+LayerLocalRead = LayerLocalWrite
+SharedWriteLocalTHCSharedAdaLNJiTBlock = SharedReadLocalTHCSharedAdaLNJiTBlock
+SharedWriteLocalTHCSharedAdaLNJiT = SharedReadLocalTHCSharedAdaLNJiT
+SharedWriteFusedFinalLocalTHCSharedAdaLNJiT = SharedReadFusedFinalLocalTHCSharedAdaLNJiT
+SharedWriteFusedFinal12LocalTHCSharedAdaLNJiT = SharedReadFusedFinal12LocalTHCSharedAdaLNJiT
 
 
 class TriangularLazyFusedFinal12LocalTHCDirectTritonSharedAdaLNJiT(LocalTHCDirectTritonTraceableSharedAdaLNJiT):
@@ -1406,9 +1455,9 @@ class TriangularLazyFusedFinal12LocalTHCDirectTritonSharedAdaLNJiT(LocalTHCDirec
     def _expanded_alpha(self, block: nn.Module, dtype: torch.dtype) -> torch.Tensor:
         hyper = block.hyper
         if hyper.use_softmax_write:
-            alpha = F.softmax(hyper.write_logits.float(), dim=-1)
+            alpha = F.softmax(hyper.read_logits.float(), dim=-1)
         else:
-            alpha = hyper.write_logits
+            alpha = hyper.read_logits
         alpha = alpha.to(dtype=dtype)
         if hyper.group_dim == 1:
             return alpha
@@ -1418,7 +1467,7 @@ class TriangularLazyFusedFinal12LocalTHCDirectTritonSharedAdaLNJiT(LocalTHCDirec
 
     def _expanded_beta(self, block: nn.Module, dtype: torch.dtype) -> torch.Tensor:
         hyper = block.hyper
-        beta = hyper.read_weight.to(dtype=dtype)
+        beta = hyper.write_weight.to(dtype=dtype)
         if hyper.group_dim == 1:
             return beta
         return beta[:, None, :].expand(hyper.pool_groups, hyper.group_dim, hyper.cell_tokens).reshape(
@@ -1658,6 +1707,18 @@ def SharedWrite_FusedFinal12_LocalTHC_SharedAdaLN_JiT_B_4(**kwargs) -> SharedWri
     return SharedWriteFusedFinal12LocalTHCSharedAdaLNJiT(patch_size=4, hidden_size=768, depth=12, num_heads=12, bottleneck_dim=128, workspace_grid=16, **kwargs)
 
 
+def SharedRead_LocalTHC_SharedAdaLN_JiT_B_4(**kwargs) -> SharedReadLocalTHCSharedAdaLNJiT:
+    return SharedWrite_LocalTHC_SharedAdaLN_JiT_B_4(**kwargs)
+
+
+def SharedRead_FusedFinal_LocalTHC_SharedAdaLN_JiT_B_4(**kwargs) -> SharedReadFusedFinalLocalTHCSharedAdaLNJiT:
+    return SharedWrite_FusedFinal_LocalTHC_SharedAdaLN_JiT_B_4(**kwargs)
+
+
+def SharedRead_FusedFinal12_LocalTHC_SharedAdaLN_JiT_B_4(**kwargs) -> SharedReadFusedFinal12LocalTHCSharedAdaLNJiT:
+    return SharedWrite_FusedFinal12_LocalTHC_SharedAdaLN_JiT_B_4(**kwargs)
+
+
 def TriangularLazy_FusedFinal12_LocalTHC_DirectTriton_SharedAdaLN_JiT_B_4(
     **kwargs,
 ) -> TriangularLazyFusedFinal12LocalTHCDirectTritonSharedAdaLNJiT:
@@ -1691,6 +1752,10 @@ def TriangularLazy_FusedFinal12_LocalTHC_TritonTraceable_SharedAdaLN_JiT_B_4(
 def SharedWrite_LocalTHC_SharedAdaLN_JiT_B_8(**kwargs) -> SharedWriteLocalTHCSharedAdaLNJiT:
     kwargs.setdefault("pool_groups", 768)
     return SharedWriteLocalTHCSharedAdaLNJiT(patch_size=8, hidden_size=768, depth=12, num_heads=12, bottleneck_dim=128, workspace_grid=16, **kwargs)
+
+
+def SharedRead_LocalTHC_SharedAdaLN_JiT_B_8(**kwargs) -> SharedReadLocalTHCSharedAdaLNJiT:
+    return SharedWrite_LocalTHC_SharedAdaLN_JiT_B_8(**kwargs)
 
 
 def LocalTHC_JiT_L_4(**kwargs) -> LocalTHCJiT:
@@ -1751,11 +1816,15 @@ LocalTHC_JiT_models = {
     "LocalTHC-SharedAdaLN-JiT-B/8": LocalTHC_SharedAdaLN_JiT_B_8,
     "LocalTHC-InContext-SharedAdaLN-JiT-B/8": LocalTHC_InContext_SharedAdaLN_JiT_B_8,
     "LocalTHC-InContext-CompilerFriendly-SharedAdaLN-JiT-B/8": LocalTHC_InContext_CompilerFriendly_SharedAdaLN_JiT_B_8,
+    "SharedRead-LocalTHC-SharedAdaLN-JiT-B/4": SharedRead_LocalTHC_SharedAdaLN_JiT_B_4,
+    "SharedRead-FusedFinal-LocalTHC-SharedAdaLN-JiT-B/4": SharedRead_FusedFinal_LocalTHC_SharedAdaLN_JiT_B_4,
+    "SharedRead-FusedFinal12-LocalTHC-SharedAdaLN-JiT-B/4": SharedRead_FusedFinal12_LocalTHC_SharedAdaLN_JiT_B_4,
     "SharedWrite-LocalTHC-SharedAdaLN-JiT-B/4": SharedWrite_LocalTHC_SharedAdaLN_JiT_B_4,
     "SharedWrite-FusedFinal-LocalTHC-SharedAdaLN-JiT-B/4": SharedWrite_FusedFinal_LocalTHC_SharedAdaLN_JiT_B_4,
     "SharedWrite-FusedFinal12-LocalTHC-SharedAdaLN-JiT-B/4": SharedWrite_FusedFinal12_LocalTHC_SharedAdaLN_JiT_B_4,
     "TriangularLazy-FusedFinal12-LocalTHC-DirectTriton-SharedAdaLN-JiT-B/4": TriangularLazy_FusedFinal12_LocalTHC_DirectTriton_SharedAdaLN_JiT_B_4,
     "TriangularLazy-FusedFinal12-LocalTHC-TritonTraceable-SharedAdaLN-JiT-B/4": TriangularLazy_FusedFinal12_LocalTHC_TritonTraceable_SharedAdaLN_JiT_B_4,
+    "SharedRead-LocalTHC-SharedAdaLN-JiT-B/8": SharedRead_LocalTHC_SharedAdaLN_JiT_B_8,
     "SharedWrite-LocalTHC-SharedAdaLN-JiT-B/8": SharedWrite_LocalTHC_SharedAdaLN_JiT_B_8,
     "LocalTHC-JiT-L/4": LocalTHC_JiT_L_4,
     "LocalTHC-JiT-L/8": LocalTHC_JiT_L_8,

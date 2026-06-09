@@ -1,6 +1,6 @@
 # Kernel fusion notes
 
-This note explains the system side of the released `SharedWrite-FusedFinal12` model.
+This note explains the system side of the released `SharedRead-FusedFinal12` model.
 
 ## The bandwidth problem
 

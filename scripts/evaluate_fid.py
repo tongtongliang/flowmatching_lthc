@@ -12,6 +12,7 @@ import torch
 import torch.distributed as dist
 from PIL import Image
 
+from imaget_lthc.checkpoint import load_model_state
 from imaget_lthc.models import MODEL_NAMES, build_model
 from imaget_lthc.sampling import sample_heun, to_uint8
 
@@ -89,18 +90,6 @@ def init_dist():
     return True, rank, world, local_rank
 
 
-def load_state(model, ckpt, key):
-    if key == 'model':
-        model.load_state_dict(ckpt['model'])
-        return
-    ema = ckpt['ema']
-    state = model.state_dict()
-    for name in list(state.keys()):
-        if name in ema:
-            state[name] = ema[name]
-    model.load_state_dict(state)
-
-
 def infer_model_name(args, ckpt):
     if args.model != 'auto':
         return args.model
@@ -110,7 +99,7 @@ def infer_model_name(args, ckpt):
     meta = ckpt.get('meta') or {}
     if isinstance(meta, dict) and meta.get('model') in MODEL_NAMES:
         return meta['model']
-    return 'jit_b16_shared_time'
+    return 'lthc_b4_velocity'
 
 
 def infer_prediction(args, ckpt):
@@ -252,7 +241,7 @@ def main():
     model_name = infer_model_name(args, ckpt)
     prediction = infer_prediction(args, ckpt)
     model = build_model(model_name, attn_backend=args.attn_backend).to(device).eval()
-    load_state(model, ckpt, args.state_key)
+    load_model_state(model, ckpt, args.state_key)
     if args.compile:
         torch._dynamo.config.cache_size_limit = 128
         print(f'torch_compile_mode={args.compile_mode}', flush=True)

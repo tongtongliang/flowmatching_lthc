@@ -4,7 +4,7 @@ Local Token Hyper-Connection (LTHC) is a diffusion backbone for class-conditiona
 
 ![LTHC architecture](docs/assets/lthc_architecture.png)
 
-This repository is a cleaned-up release snapshot of the model used in the `SharedWrite-FusedFinal12 LocalTHC-B/4 velocity` experiments. It contains the model, training loop, Heun sampler, FID/IS evaluation entry point, and the Triton kernels used by the fast shared-write implementation.
+This repository is a cleaned-up release snapshot of the model used in the `SharedRead-FusedFinal12 LocalTHC-B/4 velocity` experiments. It contains the model, training loop, Heun sampler, FID/IS evaluation entry point, and the Triton kernels used by the fast shared-read implementation.
 
 ## Why LTHC?
 
@@ -30,8 +30,19 @@ lthc_b4_velocity
 Checkpoint-compatible internal name:
 
 ```text
+local_thc_jit_shared_read_fused_final12_shared_adaln_b4
+```
+
+Legacy run/checkpoint alias, still accepted by `build_model()`:
+
+```text
 local_thc_jit_shared_write_fused_final12_shared_adaln_b4
 ```
+
+The legacy alias says `shared_write` because early research code used the
+opposite naming convention. In this repository, `read` means
+high-resolution residual to workspace and `write` means workspace update back
+to the residual stream.
 
 Architecture summary:
 
@@ -132,6 +143,9 @@ Reference run:
 ```text
 im256_local_thc_shared_write_fused_final12_b4_velocity_gpus4567_bs128_accum2_20260531_055810
 ```
+
+The run directory keeps its original legacy name; the architecture is the
+shared-read model described above.
 
 50k-sample ImageNet validation FID/IS, Heun 50, CFG 2.9. EMA is the main evaluation path after 250k; raw/model numbers are included where they were run.
 

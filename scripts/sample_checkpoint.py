@@ -13,6 +13,7 @@ from pathlib import Path
 import torch
 from PIL import Image
 
+from imaget_lthc.checkpoint import load_model_state
 from imaget_lthc.models import build_model
 from imaget_lthc.sampling import sample_heun, to_uint8
 
@@ -45,7 +46,10 @@ def infer_model_name(args, ckpt):
         return args.model
     ckpt_args = ckpt.get("args") or {}
     name = ckpt_args.get("model") if isinstance(ckpt_args, dict) else None
-    if name == "local_thc_jit_shared_write_fused_final12_shared_adaln_b4":
+    if name in {
+        "local_thc_jit_shared_read_fused_final12_shared_adaln_b4",
+        "local_thc_jit_shared_write_fused_final12_shared_adaln_b4",
+    }:
         return name
     return "lthc_b4_velocity"
 
@@ -56,18 +60,6 @@ def infer_prediction(args, ckpt):
     ckpt_args = ckpt.get("args") or {}
     pred = ckpt_args.get("prediction") if isinstance(ckpt_args, dict) else None
     return pred if pred in {"clean", "velocity"} else "velocity"
-
-
-def load_state(model, ckpt, key):
-    if key == "model":
-        model.load_state_dict(ckpt["model"])
-        return
-    state = model.state_dict()
-    ema = ckpt["ema"]
-    for name in state:
-        if name in ema:
-            state[name] = ema[name]
-    model.load_state_dict(state)
 
 
 def save_grid(images, path, nrow=4):
@@ -90,7 +82,7 @@ def main():
     model_name = infer_model_name(args, ckpt)
     prediction = infer_prediction(args, ckpt)
     model = build_model(model_name, attn_backend="flash" if device.type == "cuda" else "math")
-    load_state(model, ckpt, args.state_key)
+    load_model_state(model, ckpt, args.state_key)
     model.to(device).eval()
     if args.compile:
         model = torch.compile(model, mode=args.compile_mode)
