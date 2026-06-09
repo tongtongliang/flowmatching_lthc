@@ -147,6 +147,14 @@ Expected filename:
 step_00400000.pt
 ```
 
+Download:
+
+```bash
+mkdir -p checkpoints
+wget -O checkpoints/step_00400000.pt \
+  https://github.com/tongtongliang/flowmatching_lthc/releases/download/v0.1.0/step_00400000.pt
+```
+
 After downloading, set:
 
 ```bash
