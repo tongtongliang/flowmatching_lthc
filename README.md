@@ -115,15 +115,29 @@ im256_local_thc_shared_write_fused_final12_b4_velocity_gpus4567_bs128_accum2_202
 
 The run directory keeps its original legacy name; the architecture is the shared-read model described above.
 
-50k-sample ImageNet validation FID/IS, Heun 50, CFG 2.9:
+50k-sample ImageNet validation metrics, EMA checkpoint, Heun 50, CFG 2.9:
 
-| step | raw/model FID50k | EMA FID50k | EMA IS |
-|---:|---:|---:|---:|
-| 200k | 19.87 | not run | not run |
-| 250k | 17.32 | 14.30 | 104.57 |
-| 300k | 17.10 | 12.52 | 114.42 |
-| 350k | not run | 11.31 | 122.80 |
-| 400k | not run | 10.63 | 127.59 |
+| step | EMA FID-50k | EMA IS | DINOv2-g FD | SigLIP2-g FD |
+|---:|---:|---:|---:|---:|
+| 50k | 75.49 | 20.46 | 1369.41 | 204.75 |
+| 100k | 31.99 | 51.85 | 1072.83 | 167.18 |
+| 150k | 21.34 | 75.10 | 908.00 | 153.74 |
+| 200k | 16.75 | 91.75 | 805.70 | 146.15 |
+| 250k | 14.30 | 104.53 | not run | 141.14 |
+| 300k | 12.52 | 114.42 | not run | not run |
+| 350k | 11.31 | 122.80 | not run | not run |
+| 400k | 10.63 | 127.59 | not run | not run |
+
+![FID curve](docs/assets/fid50k_lthc_vs_no_lthc.png)
+
+The important ablation is direct patch-16 velocity prediction without the LTHC high-resolution residual interface. It uses the same velocity objective and a comparable shared-AdaLN workspace Transformer, but directly processes 16x16 patch tokens. We only trained this baseline to 100k because it was already clearly failing: EMA FID-50k stayed around 170 and the training loss barely moved.
+
+| model | step | EMA FID-50k | EMA IS | training loss |
+|---|---:|---:|---:|---:|
+| LTHC-B/4 velocity | 100k | 31.99 | 51.85 | 0.064 |
+| No-LTHC patch-16 velocity | 100k | 169.80 | 6.83 | 0.881 |
+
+![Training loss comparison](docs/assets/train_loss_lthc_vs_no_lthc.png)
 
 The compact CSV/plot snapshot is stored in `results/lthc_patch4_ema50k/`.
 
