@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "imaget-lthc"
+name = "flowmatching-lthc"
 version = "0.1.0"
-description = "Local Token Hyper-Connection diffusion model for ImageNet-256"
+description = "Local Token Hyper-Connection flow-matching diffusion model"
 requires-python = ">=3.10"
 dependencies = [
   "torch>=2.4",
@@ -17,4 +17,4 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["imaget_lthc*"]
+include = ["flowmatching_lthc*", "imaget_lthc*"]

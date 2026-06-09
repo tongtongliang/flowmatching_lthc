@@ -5,7 +5,7 @@ set -euo pipefail
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export DATA_PATH="${DATA_PATH:-/path/to/imagenet256}"
 export RUN_DIR="${RUN_DIR:-runs/lthc_b4_velocity_$(date -u +%Y%m%d_%H%M%S)}"
-export WANDB_PROJECT="${WANDB_PROJECT:-jit-imagenet256}"
+export WANDB_PROJECT="${WANDB_PROJECT:-flowmatching-lthc}"
 export WANDB_ENTITY="${WANDB_ENTITY:-}"
 export WANDB_ID="${WANDB_ID:-lthc_b4_velocity_$(date -u +%Y%m%d_%H%M%S)}"
 export TMPDIR="${TMPDIR:-/data/pengrun/tongtong/.tmp}"

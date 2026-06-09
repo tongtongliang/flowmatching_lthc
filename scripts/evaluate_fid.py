@@ -12,9 +12,9 @@ import torch
 import torch.distributed as dist
 from PIL import Image
 
-from imaget_lthc.checkpoint import load_model_state
-from imaget_lthc.models import MODEL_NAMES, build_model
-from imaget_lthc.sampling import sample_heun, to_uint8
+from flowmatching_lthc.checkpoint import load_model_state
+from flowmatching_lthc.models import MODEL_NAMES, build_model
+from flowmatching_lthc.sampling import sample_heun, to_uint8
 
 
 def parse_args():

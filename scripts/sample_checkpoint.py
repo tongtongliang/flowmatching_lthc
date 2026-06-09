@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sample from an ImageNet LTHC checkpoint.
+"""Sample from a FlowMatching LTHC checkpoint.
 
 Use ``--naive`` on CPU or for checkpoint validation. The default lazy path uses the fused
 Triton final-accumulate kernel and is intended for CUDA inference.
@@ -13,9 +13,9 @@ from pathlib import Path
 import torch
 from PIL import Image
 
-from imaget_lthc.checkpoint import load_model_state
-from imaget_lthc.models import build_model
-from imaget_lthc.sampling import sample_heun, to_uint8
+from flowmatching_lthc.checkpoint import load_model_state
+from flowmatching_lthc.models import build_model
+from flowmatching_lthc.sampling import sample_heun, to_uint8
 
 
 def parse_args():

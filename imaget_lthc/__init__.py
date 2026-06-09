@@ -1,5 +1,7 @@
-"""ImageNet Local Token Hyper-Connection diffusion models."""
+"""Backward-compatible import alias for the renamed package.
 
-from .models import MODEL_NAMES, build_model
+Use ``flowmatching_lthc`` in new code. This package remains so older scripts
+that import ``imaget_lthc`` keep working.
+"""
 
-__all__ = ["MODEL_NAMES", "build_model"]
+from flowmatching_lthc import *  # noqa: F401,F403

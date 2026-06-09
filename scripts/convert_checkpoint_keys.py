@@ -8,7 +8,7 @@ from pathlib import Path
 
 import torch
 
-from imaget_lthc.checkpoint import migrate_checkpoint_state
+from flowmatching_lthc.checkpoint import migrate_checkpoint_state
 
 
 def parse_args():

@@ -10,10 +10,10 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from imaget_lthc.checkpoint import load_model_state, migrate_checkpoint_state
-from imaget_lthc.imagenet import build_dataset, build_loader
-from imaget_lthc.models import MODEL_NAMES, build_model
-from imaget_lthc.optim.muon import Muon, split_muon_params
+from flowmatching_lthc.checkpoint import load_model_state, migrate_checkpoint_state
+from flowmatching_lthc.imagenet import build_dataset, build_loader
+from flowmatching_lthc.models import MODEL_NAMES, build_model
+from flowmatching_lthc.optim.muon import Muon, split_muon_params
 
 
 def parse_args():
