@@ -125,6 +125,34 @@ Configuration summary:
 | objective | velocity prediction |
 | sampler | Heun, 50 steps, CFG |
 
+## Compute Snapshot
+
+The table below counts one multiply-add as two FLOPs. The estimates include
+patch embedding, attention projections, attention matrix products, SwiGLU MLPs,
+the LTHC read/write interface, and the final patch decoder. Norms, activations,
+softmax scalar overhead, and classifier-free guidance doubling at sampling time
+are not included.
+
+| model | params | global attention tokens | high-res residual tokens | approx GFLOPs / forward | note |
+|---|---:|---:|---:|---:|---|
+| LTHC-B/4 velocity | 91.63M | 256 | 4096 | 47.15 | released model |
+| direct patch-16 shared-AdaLN JiT-B | 92.32M | 256 | none | 46.31 | low-res baseline |
+| direct patch-4 shared-AdaLN JiT-B | 94.62M | 4096 | none | 1315.42 | full patch-4 attention reference |
+| direct patch-16 standard AdaLN JiT-B | ~131.30M | 256 | none | ~46.31 | per-block AdaLN parameter reference |
+
+The released model uses PixelArt-style **shared AdaLN** rather than standard
+per-block AdaLN-Zero. For `C=768` and `depth=12`, a per-block `C -> 6C`
+AdaLN modulation stack would use about `42.5M` block-modulation parameters.
+The shared-AdaLN version uses one such modulation head, about `3.54M`
+parameters, plus a shared final modulation head. This saves about `39M`
+parameters without changing the workspace Transformer FLOPs materially.
+
+The LTHC interface itself is small: one shared channel-wise read and twelve
+layer-specific channel-wise writes add only about `0.16M` parameters. The
+point of LTHC is therefore not parameter scaling; it is keeping a patch-4
+high-resolution residual state while running global communication on a
+patch-16-sized workspace.
+
 ## Triton Fast Path
 
 The lazy workspace recurrence removes most per-layer high-resolution traffic. The remaining expensive step is final materialization:
