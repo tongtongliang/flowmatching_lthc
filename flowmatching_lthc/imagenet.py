@@ -17,7 +17,7 @@ from torchvision import datasets, transforms
 
 
 def center_crop_arr(pil_image, image_size):
-    # Matches the ADM/EDM center-crop behavior used by Modified_DiT.
+    # Matches the ADM/EDM center-crop convention commonly used for ImageNet-256.
     while min(*pil_image.size) >= 2 * image_size:
         pil_image = pil_image.resize(tuple(x // 2 for x in pil_image.size), resample=Image.Resampling.BOX)
     scale = image_size / min(*pil_image.size)

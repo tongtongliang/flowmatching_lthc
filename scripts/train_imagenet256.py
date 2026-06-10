@@ -18,7 +18,7 @@ from flowmatching_lthc.optim.muon import Muon, split_muon_params
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--data_path', default='../dataset_imagenet_256/imagenet256')
+    p.add_argument('--data_path', required=True)
     p.add_argument('--run_dir', default='runs/lthc_experiment')
     p.add_argument('--batch_size', type=int, default=128)
     p.add_argument('--grad_accum', type=int, default=1)
@@ -48,14 +48,14 @@ def parse_args():
         help='torch.compile mode. auto keeps the historical train.py behavior.',
     )
     p.add_argument('--attn_backend', default='flash', choices=['flash','efficient','math','default'])
-    p.add_argument('--model', default='jit_b16_shared_time', choices=MODEL_NAMES)
+    p.add_argument('--model', default='lthc_b4_velocity', choices=MODEL_NAMES)
     p.add_argument('--resume', default='')
     p.add_argument('--wandb', action='store_true')
-    p.add_argument('--wandb_project', default='jit-imagenet256')
-    p.add_argument('--wandb_entity', default='tol011-uc-san-diego')
-    p.add_argument('--wandb_group', default='baseline')
+    p.add_argument('--wandb_project', default='flowmatching-lthc')
+    p.add_argument('--wandb_entity', default='')
+    p.add_argument('--wandb_group', default='lthc-b4-velocity')
     p.add_argument('--wandb_id', default='')
-    p.add_argument('--run_name', default='jit_b16_shared_time_adaln_cls_tokens')
+    p.add_argument('--run_name', default='lthc_b4_velocity')
     return p.parse_args()
 
 
@@ -226,7 +226,7 @@ def main():
         import wandb
         wb = wandb.init(
             project=args.wandb_project,
-            entity=args.wandb_entity,
+            entity=args.wandb_entity or None,
             group=args.wandb_group,
             id=args.wandb_id or None,
             name=args.run_name,

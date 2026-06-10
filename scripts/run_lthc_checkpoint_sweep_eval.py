@@ -21,15 +21,9 @@ import zipfile
 from pathlib import Path
 
 
-DEFAULT_SOURCE_RUN = "/data/pengrun/tongtong/ImageNet-256-JiT/runs/im256_local_thc_shared_write_fused_final12_b4_velocity_gpus4567_bs128_accum2_20260531_055810"
-DEFAULT_FID_STATS = "/data/pengrun/tongtong/Modified_DiT/modified_JiT/fid_stats/jit_in256_stats.npz"
-DEFAULT_REAL_ZIP = "/data/pengrun/tongtong/dataset_imagenet_256/imagenet1k_val/images.zip"
-DEFAULT_FEATURE_ROOT = "/data/pengrun/tongtong/vision_feature_extract"
-
-
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--source_run", default=DEFAULT_SOURCE_RUN)
+    p.add_argument("--source_run", required=True)
     p.add_argument("--output_dir", default="eval_runs/lthc_patch4_50k_recheck")
     p.add_argument("--steps", nargs="+", type=int, default=[50000, 100000, 150000, 200000, 250000, 300000, 350000, 400000])
     p.add_argument("--state_key", default="ema", choices=["ema", "model"])
@@ -39,10 +33,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--interval_min", type=float, default=0.1)
     p.add_argument("--interval_max", type=float, default=1.0)
     p.add_argument("--noise_scale", type=float, default=1.0)
-    p.add_argument("--fid_stats", default=DEFAULT_FID_STATS)
-    p.add_argument("--real_zip", default=DEFAULT_REAL_ZIP)
+    p.add_argument("--fid_stats", required=True)
+    p.add_argument("--real_zip", required=True)
     p.add_argument("--real_dir", default="")
-    p.add_argument("--feature_root", default=DEFAULT_FEATURE_ROOT)
+    p.add_argument("--feature_root", default=os.environ.get("FEATURE_ROOT", ""))
     p.add_argument("--feature_models", nargs="+", default=["dinov2_giant_reg", "siglip2_giant_opt"])
     p.add_argument("--nproc_per_node", type=int, default=8)
     p.add_argument("--sample_batch_per_rank", type=int, default=256)
@@ -291,8 +285,8 @@ def main() -> None:
     samples_root = out / "samples"
 
     env = os.environ.copy()
-    env.setdefault("TMPDIR", "/data/pengrun/tongtong/.tmp")
-    env.setdefault("TORCH_HOME", "/data/pengrun/tongtong/dataset_imagenet_256/metrics_cache/torch_home")
+    env.setdefault("TMPDIR", str(out / "cache" / "tmp"))
+    env.setdefault("TORCH_HOME", str(out / "cache" / "torch_home"))
     env.setdefault("XDG_CACHE_HOME", str(out / "cache" / "xdg"))
     env["PYTHONPATH"] = str(repo) + os.pathsep + env.get("PYTHONPATH", "")
     metric_gpu_ids = visible_gpu_ids(env, args.nproc_per_node)

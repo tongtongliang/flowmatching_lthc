@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--real_dir', required=True)
     p.add_argument('--fake_dir', required=True)
     p.add_argument('--output_dir', required=True)
-    p.add_argument('--feature_root', default='/data/pengrun/tongtong/vision_feature_extract')
+    p.add_argument('--feature_root', default=os.environ.get('FEATURE_ROOT', ''))
     p.add_argument('--model_alias', required=True)
     p.add_argument('--checkpoint_step', type=int, required=True)
     p.add_argument('--max_images', type=int, default=50000)

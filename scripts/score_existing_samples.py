@@ -34,7 +34,7 @@ def parse_args():
     p.add_argument('--interval_min', type=float, default=0.1)
     p.add_argument('--interval_max', type=float, default=1.0)
     p.add_argument('--noise_scale', type=float, default=1.0)
-    p.add_argument('--fid_stats', default='/data/pengrun/tongtong/Modified_DiT/modified_JiT/fid_stats/jit_in256_stats.npz')
+    p.add_argument('--fid_stats', default='fid_stats/imagenet256_stats.npz')
     p.add_argument('--csv_file', default='fid_is.csv')
     p.add_argument('--sampling_sec', type=float, default=float('nan'))
     p.add_argument('--png_write_sec_rank0', type=float, default=float('nan'))

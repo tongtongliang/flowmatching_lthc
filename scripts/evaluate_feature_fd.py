@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--real_dir", required=True)
     p.add_argument("--fake_dir", required=True)
     p.add_argument("--output_dir", required=True)
-    p.add_argument("--feature_root", default="/data/pengrun/tongtong/vision_feature_extract")
+    p.add_argument("--feature_root", default=os.environ.get("FEATURE_ROOT", ""))
     p.add_argument("--models", nargs="+", default=["dinov2_giant_reg", "siglip2_giant_opt"])
     p.add_argument("--max_images", type=int, default=50000)
     p.add_argument("--seed", type=int, default=12345)
@@ -44,6 +44,10 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
 def setup_feature_imports(feature_root: Path) -> None:
+    if str(feature_root) in {"", "."}:
+        raise ValueError("Provide --feature_root or set FEATURE_ROOT to the feature extraction helper repository.")
+    if not feature_root.exists():
+        raise FileNotFoundError(feature_root)
     sys.path.insert(0, str(feature_root))
     cache = feature_root / "cache"
     os.environ.setdefault("HF_HOME", str(cache / "huggingface"))

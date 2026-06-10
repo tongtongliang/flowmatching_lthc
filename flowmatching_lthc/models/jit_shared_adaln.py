@@ -1,7 +1,7 @@
 """JiT-B style ImageNet model with time-only shared AdaLN and class-prefix tokens.
 
-This intentionally differs from Modified_DiT: timestep conditioning enters the
-AdaLN path, while class conditioning enters only through in-context prefix tokens.
+Timestep conditioning enters the AdaLN path, while class conditioning enters
+only through in-context prefix tokens.
 """
 import math
 from contextlib import nullcontext

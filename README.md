@@ -277,6 +277,8 @@ attention         PyTorch SDPA with flash backend preference
 
 Equivalent config is stored in `configs/lthc_b4_velocity_imagenet256.json`.
 
+The launch script is a public template. The released checkpoint was trained to 400k steps; extend `--max_steps` or resume training if you want to reproduce the full run.
+
 ## Evaluation
 
 The evaluation script samples images and computes FID/IS if torch-fidelity and an ImageNet-256 statistics file are available:

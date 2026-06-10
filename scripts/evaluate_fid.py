@@ -47,8 +47,8 @@ def parse_args():
     p.add_argument('--keep_samples', action='store_true', help='Keep generated PNGs instead of deleting them after metrics.')
     p.add_argument('--sample_only', action='store_true', help='Only generate PNG samples; do not compute FID/IS or write the metric CSV.')
     p.add_argument('--wandb', action='store_true')
-    p.add_argument('--wandb_project', default='jit-imagenet256')
-    p.add_argument('--wandb_entity', default='tol011-uc-san-diego')
+    p.add_argument('--wandb_project', default='flowmatching-lthc')
+    p.add_argument('--wandb_entity', default='')
     p.add_argument('--wandb_run_id', default='')
     p.add_argument('--wandb_run_name', default='')
     return p.parse_args()
@@ -154,7 +154,7 @@ def log_wandb(args, row):
 
     run = wandb.init(
         project=args.wandb_project,
-        entity=args.wandb_entity,
+        entity=args.wandb_entity or None,
         id=args.wandb_run_id,
         name=args.wandb_run_name or None,
         resume='allow',
@@ -191,16 +191,12 @@ def log_wandb(args, row):
 
 
 def compute_fid_is(sample_dir, fid_stats, cuda):
-    torch_home = Path(os.environ.get('TORCH_HOME', '/data/pengrun/tongtong/dataset_imagenet_256/metrics_cache/torch_home'))
+    torch_home = Path(os.environ.get('TORCH_HOME', '.cache/torch_home'))
     torch_home.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault('TORCH_HOME', str(torch_home))
-    # The reference JiT evaluation uses the vendored torch-fidelity fork,
-    # which supports precomputed FID statistics through fid_statistics_file.
-    # The PyPI/conda API in some environments requires input2 and will reject
-    # input2=None, so prefer the vendored implementation when it is available.
-    vendor_tf = Path('/data/pengrun/tongtong/Modified_DiT/modified_JiT/src/torch-fidelity')
-    if vendor_tf.is_dir() and str(vendor_tf) not in sys.path:
-        sys.path.insert(0, str(vendor_tf))
+    vendor_tf = os.environ.get('TORCH_FIDELITY_PATH', '')
+    if vendor_tf and Path(vendor_tf).is_dir() and vendor_tf not in sys.path:
+        sys.path.insert(0, vendor_tf)
     import torch_fidelity
 
     return torch_fidelity.calculate_metrics(
