@@ -1,14 +1,14 @@
 # FlowMatching-LTHC
 
-FlowMatching-LTHC is a flow-matching diffusion backbone built around **Local Token Hyper-Connections**. The model keeps a persistent high-resolution residual state, but performs the expensive global Transformer computation on a compact workspace.
+FlowMatching-LTHC is a flow-matching diffusion backbone built around **Local Token Hyper-Connections**. It keeps a high-resolution residual stream for local image detail, while running the expensive global Transformer computation on a much smaller workspace.
 
 The released checkpoint is a class-conditional ImageNet-256 velocity model. ImageNet is the reference experiment, not a hard assumption of the architecture.
 
-![LTHC architecture](docs/assets/lthc_architecture.png)
+![LTHC read-transform-write block](docs/assets/lthc_forward_projection3d.png)
 
 ## Core Idea
 
-A patch-4 Transformer on 256x256 images has 4096 image tokens, which makes full attention expensive. A patch-16 model has only 256 tokens, but loses high-resolution residual capacity.
+A direct patch-4 Transformer on 256x256 images has `64 x 64 = 4096` image tokens, making global attention expensive. A patch-16 Transformer has only `16 x 16 = 256` tokens, but it throws away the high-resolution residual interface that patch-4 models can use to preserve local structure.
 
 LTHC separates these roles:
 
@@ -17,7 +17,13 @@ high-resolution residual state: 64 x 64 local tokens
 low-resolution global workspace: 16 x 16 tokens
 ```
 
-Each layer reads local high-resolution cells into workspace tokens, applies a standard JiT-style Transformer branch on the workspace, then writes the workspace update back into the high-resolution residual stream.
+Each block performs a read-transform-write update:
+
+1. **Read:** a local `4 x 4` high-resolution cell is pooled into one workspace token, channel by channel.
+2. **Transform:** a standard JiT-style Transformer block processes the `16 x 16` workspace.
+3. **Write:** the workspace update is projected back into the corresponding high-resolution cell and added to the residual stream.
+
+The Transformer never attends over all 4096 high-resolution tokens. It attends over the 256 workspace tokens, while the high-resolution stream remains available as the persistent residual state.
 
 The workspace branch keeps the usual modern DiT/JiT components:
 
@@ -31,32 +37,56 @@ There are no class/time/register prefix tokens in the released model.
 
 ## Architecture
 
-Let $X_l$ be the persistent high-resolution residual state and $Z_l$ be the low-resolution workspace at layer $l$.
+Let $X_l$ be the high-resolution residual state at layer `l`, and let $Z_l$ be the low-resolution workspace. In cell notation,
+
+```text
+X_l: [B, 16*16, 4*4, C]
+Z_l: [B, 16*16, C]
+```
+
+where each workspace token corresponds to one `4 x 4` cell in the high-resolution grid.
 
 A generic LTHC block is:
 
-$Z_l = R_l(X_l)$
+$$
+Z_l = R_l(X_l)
+$$
 
-$\Delta Z_l = F_l(Z_l, c)$
+$$
+\Delta Z_l = F_l(Z_l, c)
+$$
 
-$X_{l+1} = X_l + P_l(\Delta Z_l)$
+$$
+X_{l+1} = X_l + P_l(\Delta Z_l)
+$$
 
 Here:
 
-- $R_l$ reads high-resolution residual cells into workspace tokens.
-- $F_l$ is the workspace Transformer branch.
-- $P_l$ writes workspace updates back to the high-resolution residual stream.
+- $R_l$ is the local read from the high-resolution residual stream to the workspace.
+- $F_l$ is the Transformer block that runs on workspace tokens.
+- $P_l$ is the local write from workspace updates back to the residual stream.
 - $c$ is the time-plus-class conditioning vector.
 
-The released model uses a shared read operator, $R_l = R$, and layer-specific write operators, $P_l$. Because $R$ is shared and the local maps are linear, the workspace can be updated exactly without materializing the full high-resolution state after every layer:
+The local read and write are channel-wise maps inside each cell:
 
-$Z_{l+1} = Z_l + \Gamma_l \Delta Z_l$
+```text
+read:  weighted 4x4 pooling, one set of weights per channel
+write: channel-wise broadcast back into the same 4x4 cell
+```
 
-The final high-resolution state is materialized once before the patch decoder:
+The released model uses a **shared read** operator, $R_l = R$, and layer-specific write operators, $P_l$. Because $R$ is shared and the local maps are linear, the workspace state can be advanced exactly without materializing the full high-resolution residual stream after every block:
 
-$X_L = X_0 + \sum_l P_l(\Delta Z_l)$
+$$
+Z_{l+1} = Z_l + \Gamma_l \Delta Z_l
+$$
 
-This shared-read design is both an architectural choice and a system optimization: it gives a stable workspace coordinate across depth and removes repeated high-resolution memory traffic from the main block loop.
+After all 12 blocks, the high-resolution state is materialized once before the patch decoder:
+
+$$
+X_L = X_0 + \sum_l P_l(\Delta Z_l)
+$$
+
+This shared-read design is both an architectural choice and a system optimization. It gives the model a stable workspace coordinate across depth, while avoiding repeated high-resolution memory traffic in the main block loop.
 
 ## Released Model
 
@@ -99,7 +129,9 @@ Configuration summary:
 
 The lazy workspace recurrence removes most per-layer high-resolution traffic. The remaining expensive step is final materialization:
 
-$X_L = X_0 + \sum_l P_l(\Delta Z_l)$
+$$
+X_L = X_0 + \sum_l P_l(\Delta Z_l)
+$$
 
 A naive PyTorch implementation would create one broadcasted high-resolution update per layer. The released fast path uses a fixed-shape Triton kernel for the B/4, depth-12 case that fuses all 12 write-back operations and the residual add into one high-resolution pass.
 
@@ -117,16 +149,16 @@ The run directory keeps its original legacy name; the architecture is the shared
 
 50k-sample ImageNet validation metrics, EMA checkpoint, Heun 50, CFG 2.9:
 
-| step | EMA FID-50k | EMA IS | DINOv2-g FD | SigLIP2-g FD |
-|---:|---:|---:|---:|---:|
-| 50k | 75.49 | 20.46 | 1369.41 | 204.75 |
-| 100k | 31.99 | 51.85 | 1072.83 | 167.18 |
-| 150k | 21.34 | 75.10 | 908.00 | 153.74 |
-| 200k | 16.75 | 91.75 | 805.70 | 146.15 |
-| 250k | 14.30 | 104.53 | not run | 141.14 |
-| 300k | 12.52 | 114.42 | not run | not run |
-| 350k | 11.31 | 122.80 | not run | not run |
-| 400k | 10.63 | 127.59 | not run | not run |
+| step | EMA FID-50k | EMA IS |
+|---:|---:|---:|
+| 50k | 75.49 | 20.46 |
+| 100k | 31.99 | 51.85 |
+| 150k | 21.34 | 75.10 |
+| 200k | 16.75 | 91.75 |
+| 250k | 14.30 | 104.53 |
+| 300k | 12.52 | 114.42 |
+| 350k | 11.31 | 122.80 |
+| 400k | 10.63 | 127.59 |
 
 ![FID curve](docs/assets/fid50k_lthc_vs_no_lthc.png)
 
@@ -293,7 +325,9 @@ flowmatching_lthc/
   docs/
     model.md
     kernel_note.md
-    assets/lthc_architecture.png
+    assets/lthc_forward_projection3d.png
+    assets/fid50k_lthc_vs_no_lthc.png
+    figures/lthc_forward_projection3d.tex
 ```
 
 ## Notes
@@ -301,4 +335,7 @@ flowmatching_lthc/
 - `flowmatching_lthc` is the canonical package name.
 - `imaget_lthc` remains as a backward-compatible import alias.
 - No dataset is committed. `DATA_PATH` should point to ImageNet-256 in ImageFolder form or a supported zip layout.
-- Add a license before making the repository public.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

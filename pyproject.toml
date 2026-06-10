@@ -6,7 +6,12 @@ build-backend = "setuptools.build_meta"
 name = "flowmatching-lthc"
 version = "0.1.0"
 description = "Local Token Hyper-Connection flow-matching diffusion model"
+readme = "README.md"
 requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Tongtong Liang", email = "liangtt724@outlook.com" },
+]
 dependencies = [
   "torch>=2.4",
   "torchvision",
@@ -15,6 +20,11 @@ dependencies = [
   "pillow",
   "wandb",
 ]
+
+[project.urls]
+Homepage = "https://github.com/tongtongliang/flowmatching_lthc"
+Repository = "https://github.com/tongtongliang/flowmatching_lthc"
+Releases = "https://github.com/tongtongliang/flowmatching_lthc/releases"
 
 [tool.setuptools.packages.find]
 include = ["flowmatching_lthc*", "imaget_lthc*"]

@@ -1,154 +1,102 @@
 # Kernel fusion notes
 
-This note explains the system side of the released `SharedRead-FusedFinal12` model.
+This note explains the system side of the released `SharedRead-FusedFinal12` model at a high level.
 
-## The bandwidth problem
+## Naming convention
 
-The high-resolution residual stream has shape
-
-```text
-[B, 64, 64, 768]
-```
-
-or, in local-cell form,
+This repository uses the public README convention:
 
 ```text
-[B, 256, 16, 768]
+read:   high-resolution residual -> workspace
+write:  workspace update -> high-resolution residual
 ```
 
-A naive implementation of each layer would do:
+The low-level Triton helper names are the one confusing exception. Some helper names still reflect an older internal convention: `read_from_residual()` may call a helper named `triton_local_write()`, while `write_to_residual()` may call `triton_local_read()`. Treat those helper names as historical implementation names, not as the public algorithmic direction.
 
-```python
-z = read_from_residual(x_hi)      # [B, 256, 768]
-dz = workspace_branch(z, c)       # [B, 256, 768]
-dx = write_to_residual(dz)        # [B, 64, 64, 768]
-x_hi = x_hi + dx
+In the released shared-read model:
+
+```text
+read_logits / alpha    high-res -> workspace pooling weights
+write_weight / beta    workspace -> high-res write-back weights
 ```
 
-The branch itself is efficient because it runs on 256 workspace tokens. The bottleneck is repeatedly reading and writing the full high-resolution residual stream and materializing broadcasted `dx` tensors.
+## High-level idea
 
-## Why shared read helps
+The model keeps two coordinate systems:
 
-With a shared read operator `R`, we can keep a persistent workspace coordinate:
+```text
+high-resolution residual stream: [B, 64, 64, C]
+low-resolution workspace:        [B, 16*16, C]
+```
+
+The Transformer blocks run on the low-resolution workspace. The high-resolution residual stream is there to preserve local image detail, but repeatedly materializing it after every block would be memory-bandwidth heavy.
+
+The shared-read design avoids that repeated high-resolution traffic. It reads the initial residual stream once:
 
 ```python
-x0 = patch_embed(image)   # high-res stream
-z = R(x0)                # initial workspace
+x0 = patch_embed(image)
+z = shared_read(x0)
+```
 
-for layer in layers:
-    dz = F_l(z, c)
+Then each block updates the workspace directly:
+
+```python
+for block in blocks:
+    dz = block.workspace_branch(z, c)
     z = z + gamma_l * dz
-
-x_final = x0 + sum_l P_l(dz_l)
 ```
 
-The key identity is
+This is exact, not an approximation. Because the read operator is shared and the local read/write maps are linear, reading after a local write-back is equivalent to multiplying the workspace update by a per-channel scale:
 
-$R P_l dz_l = \gamma_l \odot dz_l$.
+$$
+R P_l(\Delta Z_l) = \gamma_l \odot \Delta Z_l .
+$$
 
-So the loop no longer touches the high-resolution residual stream after the initial read. The high-resolution stream is touched only twice:
+## What Triton fuses
 
-1. Initial patch embedding and shared read.
-2. Final materialization before the patch decoder.
+After the 12 workspace blocks, the model still needs the high-resolution residual state for the patch decoder:
 
-This is the main system-algorithm co-design point.
+$$
+X_L[b,m,r,c] =
+X_0[b,m,r,c] +
+\sum_{l=0}^{11} \beta_l[c,r]\,\Delta Z_l[b,m,c].
+$$
 
-## What the Triton kernel fuses
-
-The final materialization is
-
-$X_L[b,m,r,c] = X_0[b,m,r,c] + \sum_{l=0}^{11} \beta_l[c,r] \Delta Z_l[b,m,c]$.
-
-A naive PyTorch implementation loops over 12 layers:
-
-```python
-x_hi = x0
-for l in range(12):
-    dx_l = dz_l[:, :, None, :] * beta_l[None, None, :, :]
-    x_hi = x_hi + reshape_to_highres(dx_l)
-```
-
-This creates 12 high-resolution broadcast tensors and performs repeated high-resolution reads/writes.
-
-The Triton kernel `final_accumulate_b4_12_traceable` fuses this into one pass:
+A naive implementation would loop over layers, create 12 high-resolution update tensors, and repeatedly read/write the high-resolution residual. The Triton fast path fuses this final accumulation into one pass:
 
 ```text
-program id m: one workspace cell m
-program id c: one channel block
-load x0[b, m, 16, c_block]
-for l in 0..11:
-    load dz_l[b, m, c_block]
-    load beta_l[c_block, 16]
-    accumulate beta_l * dz_l into the 16 local high-res positions
-store x_final[b, m, 16, c_block]
+load X0 for one workspace cell and channel block
+for l = 0..11:
+    load DeltaZ_l
+    load beta_l
+    accumulate beta_l * DeltaZ_l into the 16 local positions
+store XL once
 ```
 
-The output is exactly the same algebra as the naive implementation, up to floating-point ordering.
+So the fusion boundary is deliberately narrow: it fuses the final high-resolution write-back accumulation. It does not fuse the Transformer block, RMSNorm, AdaLN, attention, or SwiGLU. Those remain in PyTorch and use the usual optimized kernels.
 
-## Why fixed shape
+## Fixed-shape scope
 
-The released kernel specializes to:
+The released Triton path is specialized to the public B/4 checkpoint:
 
 ```text
-input_size      256
-patch_size      4
-high_grid       64
-workspace_grid  16
-cell_tokens     16
+image size      256
+patch size      4
+high-res grid   64 x 64
+workspace grid  16 x 16
+cell tokens     16
 hidden dim      768
 depth           12
 ```
 
-This makes the kernel simple and avoids dynamic-shape overhead. It also makes the graph easier for `torch.compile` to trace and cache.
+That fixed shape keeps the kernel small, traceable, and easy to compare against the naive path.
 
-## Torch compile interaction
+## Correctness path
 
-The model uses `torch.library.triton_op` wrappers in `local_thc_triton_kernels.py`. This makes the Triton operation visible to TorchDynamo/Inductor as a graph op instead of hiding it behind arbitrary Python.
-
-The practical setup used in training is:
-
-```bash
---compile --compile_mode auto
-```
-
-In `train_imagenet256.py`, `auto` maps to:
-
-- `reduce-overhead` when `grad_accum == 1`,
-- `default` when `grad_accum > 1`.
-
-For evaluation/sampling, the reference scripts use:
-
-```bash
---compile --compile_mode default
-```
-
-This was the more stable low-risk choice for large 50k-sample evaluation.
-
-## RMSNorm/AdaLN and fusion boundary
-
-The Triton kernel does not fuse RMSNorm, attention, or SwiGLU. Those remain in PyTorch and use optimized SDPA/GEMM kernels. The fusion boundary is intentionally placed around the high-resolution residual interface, because that is the part dominated by memory traffic rather than tensor-core compute.
-
-In other words:
-
-```text
-workspace branch:       leave to PyTorch SDPA/GEMM/RMSNorm kernels
-high-res write-back:    fuse with Triton
-```
-
-This keeps the implementation maintainable while addressing the specific bandwidth bottleneck introduced by LocalTHC.
-
-## Debugging and correctness
-
-The model exposes a naive path:
+The model still exposes a naive path:
 
 ```python
 model(x, t, y, use_lazy=False)
 ```
 
-This path materializes the high-resolution stream every layer and does not require the fused final accumulation kernel. It is useful for CPU sanity checks and checkpoint-loading checks.
-
-For production CUDA inference/training, use the default lazy path:
-
-```python
-model(x, t, y)
-```
+That path materializes the high-resolution residual stream after every block. It is useful for sanity checks and for comparing the lazy/fused implementation against the literal algorithm.
