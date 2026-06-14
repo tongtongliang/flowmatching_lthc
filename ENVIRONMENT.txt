@@ -1,0 +1,190 @@
+FlowMatching-LTHC Environment
+=============================
+
+This file records the software environment expected by the public repository.
+The model code is small, but the fused LocalTHC path depends on recent PyTorch,
+Triton custom ops, CUDA, and optional evaluation packages.
+
+1. Tested Reference Environment
+-------------------------------
+
+The current development environment used for this repository is:
+
+- OS: Linux
+- Python: 3.10.20
+- PyTorch: 2.8.0
+- torchvision: 0.23.0
+- Triton: 3.4.0
+- NumPy: 2.2.6
+- Pillow: 12.0.0
+- wandb: 0.25.1
+- tqdm: 4.67.1
+- scipy: 1.15.3
+- pandas: 2.3.3
+- matplotlib: 3.10.9
+- timm: 1.0.27
+- huggingface_hub: 0.36.2
+
+The Triton kernels require an NVIDIA GPU and a CUDA-enabled PyTorch build.
+The released fast path was developed for CUDA GPUs with bf16 support and
+PyTorch 2.x torch.compile support.
+
+2. Minimum Practical Requirements
+---------------------------------
+
+Recommended minimums:
+
+- Python >= 3.10
+- PyTorch >= 2.4, CUDA build strongly recommended
+- torchvision compatible with the installed PyTorch version
+- triton compatible with the installed PyTorch version
+- NVIDIA driver new enough for the chosen CUDA runtime
+- CUDA GPU for training, sampling, FID, and Triton kernels
+
+CPU-only execution is not a target for the fused LocalTHC kernels. Some import
+or checkpoint utilities may run on CPU, but training and inference should be
+run on GPU.
+
+3. Core Python Packages
+-----------------------
+
+Install the package itself in editable mode after creating an environment:
+
+    pip install -e .
+
+The core package dependencies declared in pyproject.toml are:
+
+    torch>=2.4
+    torchvision
+    triton
+    numpy
+    pillow
+    wandb
+
+For normal training and sampling, also install:
+
+    pip install tqdm scipy pandas matplotlib
+
+4. Optional Evaluation Packages
+-------------------------------
+
+FID / Inception Score evaluation uses torch-fidelity. Install it if you want to
+run scripts/evaluate_fid.py or scripts/score_existing_samples.py:
+
+    pip install torch-fidelity
+
+Feature-space FD evaluation uses an external feature-extractor helper repository
+through --feature_root or FEATURE_ROOT. The helper may require additional model
+packages such as transformers, timm, huggingface_hub, and safetensors depending
+on which feature model is used. A typical setup is:
+
+    pip install transformers timm huggingface_hub safetensors accelerate
+
+The feature-FD scripts are optional and are not required for basic sampling.
+
+5. wandb Setup
+--------------
+
+Training supports Weights & Biases logging through scripts/train_imagenet256.py.
+Install and authenticate wandb before launching a run:
+
+    pip install wandb
+    wandb login
+
+Useful environment variables:
+
+    export WANDB_PROJECT=flowmatching-lthc
+    export WANDB_ENTITY=<your_entity_if_needed>
+    export WANDB_DIR=/data/<user>/wandb
+    export WANDB_CACHE_DIR=/data/<user>/wandb_cache
+
+Do not point wandb cache or run directories at a small /tmp partition on shared
+servers. Prefer a persistent data disk.
+
+6. Cache and Data Directories
+-----------------------------
+
+For large shared servers, put all caches on a data disk:
+
+    export HF_HOME=/data/<user>/cache/huggingface
+    export HF_HUB_CACHE=/data/<user>/cache/huggingface/hub
+    export TRANSFORMERS_CACHE=/data/<user>/cache/transformers
+    export XDG_CACHE_HOME=/data/<user>/cache/xdg
+    export TORCH_HOME=/data/<user>/cache/torch_home
+    export TRITON_CACHE_DIR=/data/<user>/cache/triton
+    export TORCHINDUCTOR_CACHE_DIR=/data/<user>/cache/torchinductor
+
+Avoid relying on /tmp for torch.compile, Triton, Hugging Face, wandb, or FID
+caches. The cache can grow quickly during max-autotune compilation and large
+sample evaluations.
+
+7. Training Runtime Notes
+-------------------------
+
+The main training entry point is:
+
+    scripts/train_imagenet256.py
+
+Important runtime assumptions:
+
+- Distributed training uses torch.distributed with NCCL.
+- The model is expected to run with CUDA bf16 autocast.
+- AdamW uses fused=True when available.
+- torch.compile is supported with modes:
+
+      default
+      reduce-overhead
+      max-autotune
+      max-autotune-no-cudagraphs
+
+- The LocalTHC Triton fast path is fixed-shape for ImageNet-256, patch size 4,
+  workspace grid 16, hidden size 768, and depth 12.
+
+8. Sampling / Inference Runtime Notes
+-------------------------------------
+
+Basic inference uses:
+
+    scripts/inference.py
+    scripts/sample_checkpoint.py
+
+Recommended runtime settings:
+
+- CUDA GPU
+- bf16 autocast-capable GPU
+- Heun sampler, 50 steps for reported results
+- CFG scale matching the checkpoint evaluation protocol
+
+9. Known Package Sensitivities
+------------------------------
+
+- PyTorch/Triton custom-op APIs changed across PyTorch 2.x releases. If a
+  Triton op registration error occurs, first check the PyTorch and Triton
+  versions.
+- torch.compile performance is cache-sensitive. A cold max-autotune compile can
+  take several minutes.
+- torch-fidelity may download or cache Inception weights unless TORCH_HOME is
+  set to a persistent data disk.
+- wandb metric continuity requires reusing the same wandb run id when attaching
+  evaluation to a training run.
+
+10. Quick Smoke Commands
+------------------------
+
+Import and build the released model:
+
+    python - <<'PY'
+    from flowmatching_lthc.models import build_model
+    model = build_model('lthc_b4_velocity')
+    print(type(model).__name__)
+    PY
+
+Run a small GPU benchmark for v2 kernels, if CUDA is available:
+
+    CUDA_VISIBLE_DEVICES=0 python bench/benchmark_lthc_v2.py \
+        --models local_thc_v2_fused_final12_shared_adaln_b4 \
+        --batch_size 8 \
+        --warmup 2 \
+        --iters 3 \
+        --compile_mode reduce-overhead
+

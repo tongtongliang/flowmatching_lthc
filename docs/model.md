@@ -107,6 +107,43 @@ $X_L[b,m,r,c] = X_0[b,m,r,c] + \sum_{l=0}^{L-1} \beta_l[c,r] \Delta Z_l[b,m,c]$.
 
 The released model uses `L=12`, and this final accumulation is implemented by a fixed-shape Triton kernel.
 
+## v2 non-shared read/write path
+
+The experimental v2 models keep the same dense prediction contract but remove
+the released model's shared-read constraint:
+
+$\alpha_l \neq \alpha_j$
+
+and keep all local maps linear. There is no softmax-normalized read, no eta
+scale, and no nonlinear write gate.
+
+For a full 12-layer pack, materializing the high-resolution stream after every
+block is unnecessary. The exact base read for layer `l` is
+
+$B_l = \mathcal{R}_l(X_0)$.
+
+Previous writes contribute through a channel-wise triangular correction:
+
+$Z_l = B_l + \sum_{j<l}\gamma_{l,j}\odot \Delta Z_j$
+
+where
+
+$\gamma_{l,j}[c] = \sum_{r=1}^{16}\alpha_l[c,r]\beta_j[c,r]$.
+
+The final dense stream is still materialized, not pooled:
+
+$X_L = X_0 + \sum_{j=0}^{11}\mathcal{P}_j(\Delta Z_j)$.
+
+The current v2 B/4 implementations are:
+
+- `local_thc_v2_fused_final12_shared_adaln_b4`: non-shared linear local maps
+  with the released shared-AdaLN workspace branch.
+- `local_thc_v2_fused_final12_adaln_b4`: non-shared linear local maps with
+  standard per-block AdaLN modulation, matching the Modified-DiT style.
+
+Both use the split-output fused base-read kernel described in
+`docs/triton_kernels.md`.
+
 ## Workspace branch
 
 The conditioning vector is

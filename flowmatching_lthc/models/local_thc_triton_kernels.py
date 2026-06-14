@@ -902,6 +902,101 @@ def _all_base_b4_12_fwd_kernel_group12(
 
 
 @triton.jit
+def _all_base_b4_12_split_fwd_kernel(
+    x_ptr,
+    alpha_ptr,
+    z0_ptr,
+    z1_ptr,
+    z2_ptr,
+    z3_ptr,
+    z4_ptr,
+    z5_ptr,
+    z6_ptr,
+    z7_ptr,
+    z8_ptr,
+    z9_ptr,
+    z10_ptr,
+    z11_ptr,
+    total_low: tl.constexpr,
+    channels: tl.constexpr,
+    block_m: tl.constexpr,
+    block_c: tl.constexpr,
+):
+    """B/4 all-base read with one x0 tile load and 12 separate outputs."""
+    pid_m = tl.program_id(0)
+    pid_c = tl.program_id(1)
+    offs_m = pid_m * block_m + tl.arange(0, block_m)
+    offs_c = pid_c * block_c + tl.arange(0, block_c)
+    mask = (offs_m[:, None] < total_low) & (offs_c[None, :] < channels)
+
+    b = offs_m // 256
+    n = offs_m - b * 256
+    wy = n // 16
+    wx = n - wy * 16
+
+    acc0 = tl.zeros((block_m, block_c), tl.float32)
+    acc1 = tl.zeros((block_m, block_c), tl.float32)
+    acc2 = tl.zeros((block_m, block_c), tl.float32)
+    acc3 = tl.zeros((block_m, block_c), tl.float32)
+    acc4 = tl.zeros((block_m, block_c), tl.float32)
+    acc5 = tl.zeros((block_m, block_c), tl.float32)
+    acc6 = tl.zeros((block_m, block_c), tl.float32)
+    acc7 = tl.zeros((block_m, block_c), tl.float32)
+    acc8 = tl.zeros((block_m, block_c), tl.float32)
+    acc9 = tl.zeros((block_m, block_c), tl.float32)
+    acc10 = tl.zeros((block_m, block_c), tl.float32)
+    acc11 = tl.zeros((block_m, block_c), tl.float32)
+
+    for pos in tl.static_range(0, 16):
+        uy = pos // 4
+        ux = pos - uy * 4
+        h = wy * 4 + uy
+        w = wx * 4 + ux
+        x_offsets = (((b[:, None] * 64 + h[:, None]) * 64 + w[:, None]) * channels) + offs_c[None, :]
+        x_vals = tl.load(x_ptr + x_offsets, mask=mask, other=0.0).to(tl.float32)
+
+        alpha_offsets = (offs_c * 16) + pos
+        a0 = tl.load(alpha_ptr + alpha_offsets, mask=offs_c < channels, other=0.0).to(tl.float32)
+        a1 = tl.load(alpha_ptr + alpha_offsets + channels * 16, mask=offs_c < channels, other=0.0).to(tl.float32)
+        a2 = tl.load(alpha_ptr + alpha_offsets + 2 * channels * 16, mask=offs_c < channels, other=0.0).to(tl.float32)
+        a3 = tl.load(alpha_ptr + alpha_offsets + 3 * channels * 16, mask=offs_c < channels, other=0.0).to(tl.float32)
+        a4 = tl.load(alpha_ptr + alpha_offsets + 4 * channels * 16, mask=offs_c < channels, other=0.0).to(tl.float32)
+        a5 = tl.load(alpha_ptr + alpha_offsets + 5 * channels * 16, mask=offs_c < channels, other=0.0).to(tl.float32)
+        a6 = tl.load(alpha_ptr + alpha_offsets + 6 * channels * 16, mask=offs_c < channels, other=0.0).to(tl.float32)
+        a7 = tl.load(alpha_ptr + alpha_offsets + 7 * channels * 16, mask=offs_c < channels, other=0.0).to(tl.float32)
+        a8 = tl.load(alpha_ptr + alpha_offsets + 8 * channels * 16, mask=offs_c < channels, other=0.0).to(tl.float32)
+        a9 = tl.load(alpha_ptr + alpha_offsets + 9 * channels * 16, mask=offs_c < channels, other=0.0).to(tl.float32)
+        a10 = tl.load(alpha_ptr + alpha_offsets + 10 * channels * 16, mask=offs_c < channels, other=0.0).to(tl.float32)
+        a11 = tl.load(alpha_ptr + alpha_offsets + 11 * channels * 16, mask=offs_c < channels, other=0.0).to(tl.float32)
+        acc0 += x_vals * a0[None, :]
+        acc1 += x_vals * a1[None, :]
+        acc2 += x_vals * a2[None, :]
+        acc3 += x_vals * a3[None, :]
+        acc4 += x_vals * a4[None, :]
+        acc5 += x_vals * a5[None, :]
+        acc6 += x_vals * a6[None, :]
+        acc7 += x_vals * a7[None, :]
+        acc8 += x_vals * a8[None, :]
+        acc9 += x_vals * a9[None, :]
+        acc10 += x_vals * a10[None, :]
+        acc11 += x_vals * a11[None, :]
+
+    out_offsets = offs_m[:, None] * channels + offs_c[None, :]
+    tl.store(z0_ptr + out_offsets, acc0, mask=mask)
+    tl.store(z1_ptr + out_offsets, acc1, mask=mask)
+    tl.store(z2_ptr + out_offsets, acc2, mask=mask)
+    tl.store(z3_ptr + out_offsets, acc3, mask=mask)
+    tl.store(z4_ptr + out_offsets, acc4, mask=mask)
+    tl.store(z5_ptr + out_offsets, acc5, mask=mask)
+    tl.store(z6_ptr + out_offsets, acc6, mask=mask)
+    tl.store(z7_ptr + out_offsets, acc7, mask=mask)
+    tl.store(z8_ptr + out_offsets, acc8, mask=mask)
+    tl.store(z9_ptr + out_offsets, acc9, mask=mask)
+    tl.store(z10_ptr + out_offsets, acc10, mask=mask)
+    tl.store(z11_ptr + out_offsets, acc11, mask=mask)
+
+
+@triton.jit
 def _all_base_b4_12_grad_x_kernel(
     grad_base_ptr,
     alpha_ptr,
@@ -974,6 +1069,61 @@ def _all_base_b4_12_grad_alpha_kernel(
     grad = tl.sum(x_vals * gb_vals, axis=0)
     alpha_offsets = (pid_l * channels + offs_c) * 16 + pos
     tl.atomic_add(grad_alpha_ptr + alpha_offsets, grad, sem="relaxed", mask=offs_c < channels)
+
+
+@triton.jit
+def _all_base_b4_12_split_grad_alpha_kernel(
+    x_ptr,
+    grad_base_ptr,
+    grad_alpha_ptr,
+    total_low: tl.constexpr,
+    channels: tl.constexpr,
+    rows: tl.constexpr,
+    block_c: tl.constexpr,
+):
+    """Single-pass grad_alpha for B/4 all-base read.
+
+    grad_alpha[l, c, pos] = sum_{b,n} grad_base[l,b,n,c] * x0[b, cell(n,pos), c].
+    Each program streams one token chunk and channel chunk, keeping the full
+    [12,16,block_c] partial sum in registers.
+    """
+    pid_m = tl.program_id(0)
+    pid_c = tl.program_id(1)
+    offs_c = pid_c * block_c + tl.arange(0, block_c)
+    c_mask = offs_c < channels
+    lidx = tl.arange(0, 16)
+    l_mask = lidx < 12
+    pidx = tl.arange(0, 16)
+
+    acc = tl.zeros((16, 16, block_c), tl.float32)
+    m0 = pid_m * rows
+    for r in tl.range(0, rows):
+        m = m0 + r
+        inb = m < total_low
+        b = m // 256
+        n = m - b * 256
+        wy = n // 16
+        wx = n - wy * 16
+        uy = pidx // 4
+        ux = pidx - uy * 4
+        h = wy * 4 + uy
+        w = wx * 4 + ux
+        x_offsets = (((b * 64 + h[:, None]) * 64 + w[:, None]) * channels) + offs_c[None, :]
+        x_vals = tl.load(x_ptr + x_offsets, mask=c_mask[None, :] & inb, other=0.0).to(tl.float32)
+        gb_vals = tl.load(
+            grad_base_ptr + (lidx[:, None] * total_low + m) * channels + offs_c[None, :],
+            mask=l_mask[:, None] & c_mask[None, :] & inb,
+            other=0.0,
+        ).to(tl.float32)
+        acc += gb_vals[:, None, :] * x_vals[None, :, :]
+
+    out_offsets = (lidx[:, None, None] * channels + offs_c[None, None, :]) * 16 + pidx[None, :, None]
+    tl.atomic_add(
+        grad_alpha_ptr + out_offsets,
+        acc,
+        mask=l_mask[:, None, None] & c_mask[None, None, :],
+        sem="relaxed",
+    )
 
 
 @triton.jit
@@ -2440,6 +2590,83 @@ register_autograd(
     all_base_b4_12_traceable,
     _backward_all_base,
     setup_context=_setup_all_base_ctx,
+)
+
+
+@triton_op("jit_thc::all_base_b4_12_split_traceable", mutates_args=())
+def all_base_b4_12_split_traceable(x0: Tensor, alpha_stack: Tensor) -> list[Tensor]:
+    b = x0.shape[0]
+    c = x0.shape[3]
+    if x0.shape[1] != 64 or x0.shape[2] != 64 or alpha_stack.shape != (12, c, 16):
+        raise ValueError(
+            f"all_base_b4_12_split expects x0 [B,64,64,C] and alpha [12,C,16], "
+            f"got {tuple(x0.shape)} and {tuple(alpha_stack.shape)}"
+        )
+    outs = [torch.empty((b, 256, c), device=x0.device, dtype=x0.dtype) for _ in range(12)]
+    block_m = _env_int("JIT_THC_READ12_SPLIT_BLOCK_M", 2)
+    block_c = _env_int("JIT_THC_READ12_SPLIT_BLOCK_C", 64)
+    num_warps = _env_int("JIT_THC_READ12_SPLIT_WARPS", 2)
+
+    def grid(meta):
+        return (triton.cdiv(b * 256, meta["block_m"]), triton.cdiv(c, meta["block_c"]))
+
+    wrap_triton(_all_base_b4_12_split_fwd_kernel)[grid](
+        x0,
+        alpha_stack,
+        *outs,
+        b * 256,
+        c,
+        block_m=block_m,
+        block_c=block_c,
+        num_warps=num_warps,
+    )
+    return outs
+
+
+@triton_op("jit_thc::all_base_b4_12_split_grad_alpha", mutates_args=())
+def all_base_b4_12_split_grad_alpha_traceable(x0: Tensor, grad_base: Tensor) -> Tensor:
+    b = x0.shape[0]
+    c = x0.shape[3]
+    grad_alpha = torch.zeros((12, c, 16), device=x0.device, dtype=torch.float32)
+    rows = _env_int("JIT_THC_READ12_SPLIT_GRAD_ALPHA_ROWS", 64)
+    block_c = _env_int("JIT_THC_READ12_SPLIT_GRAD_ALPHA_BLOCK_C", 64)
+    num_warps = _env_int("JIT_THC_READ12_SPLIT_GRAD_ALPHA_WARPS", 8)
+
+    def grid(meta):
+        return (triton.cdiv(b * 256, meta["rows"]), triton.cdiv(c, meta["block_c"]))
+
+    wrap_triton(_all_base_b4_12_split_grad_alpha_kernel)[grid](
+        x0,
+        grad_base,
+        grad_alpha,
+        b * 256,
+        c,
+        rows=rows,
+        block_c=block_c,
+        num_warps=num_warps,
+    )
+    return grad_alpha
+
+
+def _setup_all_base_split_ctx(ctx, inputs, output):
+    x0, alpha_stack = inputs
+    ctx.save_for_backward(x0, alpha_stack)
+
+
+def _backward_all_base_split(ctx, *grads):
+    x0, alpha_stack = ctx.saved_tensors
+    if len(grads) == 1 and isinstance(grads[0], (list, tuple)):
+        grads = tuple(grads[0])
+    grad_base = torch.stack([g.contiguous() for g in grads], dim=0)
+    grad_x = all_base_b4_12_grad_x_traceable(grad_base, alpha_stack)
+    grad_alpha = all_base_b4_12_split_grad_alpha_traceable(x0, grad_base)
+    return grad_x, grad_alpha.to(dtype=alpha_stack.dtype)
+
+
+register_autograd(
+    all_base_b4_12_split_traceable,
+    _backward_all_base_split,
+    setup_context=_setup_all_base_split_ctx,
 )
 
 
