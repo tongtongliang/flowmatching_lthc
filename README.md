@@ -338,12 +338,11 @@ flowmatching_lthc/
       local_thc.py
       local_thc_triton_kernels.py
       jit_shared_adaln.py
+      lthc_v2/              # experimental non-shared read/write path
     checkpoint.py
     imagenet.py
     sampling.py
     optim/
-  imaget_lthc/
-    compatibility import wrappers
   scripts/
     inference.py
     train_imagenet256.py
@@ -355,15 +354,18 @@ flowmatching_lthc/
   docs/
     model.md
     kernel_note.md
+    triton_kernels.md
     assets/lthc_forward_projection3d.png
     assets/fid50k_lthc_vs_no_lthc.png
     figures/lthc_forward_projection3d.tex
+  bench/
+    benchmark_lthc_v2.py
 ```
 
 ## Notes
 
 - `flowmatching_lthc` is the canonical package name.
-- `imaget_lthc` remains as a backward-compatible import alias.
+- The old internal name `imaget_lthc` has been removed from the public repo.
 - No dataset is committed. `DATA_PATH` should point to ImageNet-256 in ImageFolder form or a supported zip layout.
 
 ## License

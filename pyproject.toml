@@ -27,4 +27,4 @@ Repository = "https://github.com/tongtongliang/flowmatching_lthc"
 Releases = "https://github.com/tongtongliang/flowmatching_lthc/releases"
 
 [tool.setuptools.packages.find]
-include = ["flowmatching_lthc*", "imaget_lthc*"]
+include = ["flowmatching_lthc*"]
